@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { liveQuery } from 'dexie'
 import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, CheckCircle2,
   ChevronLeft, ChevronRight, Clock3, Download, Dumbbell, FileDown, FileUp, Flame, History,
   House, LineChart, Minus, Pencil, Play, Plus, RotateCcw, Settings2,
   ShieldCheck, Timer, Trash2, X,
 } from 'lucide-react'
-import { db, exportBackup, exportCsv, importBackup, makeSession } from './db'
+import { exportBackup, exportCsv, importBackup } from './data/backup'
+import { makeSession } from './data/session'
+import type { WorkoutRepository } from './data/workoutRepository'
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import {
   completedSetCount, displayWeight, exerciseKey, formatDate, localDateKey, plannedSetCount,
@@ -17,7 +18,7 @@ type Screen = 'home' | 'routine' | 'workout' | 'history' | 'progress' | 'setting
 
 const blankSettings: AppSettings = { id: 'main', unit: 'kg', restTimerEnabled: true }
 
-export default function App() {
+export default function App({ repository }: { repository: WorkoutRepository }) {
   const [screen, setScreen] = useState<Screen>('home')
   const [routines, setRoutines] = useState<Routine[]>([])
   const [sessions, setSessions] = useState<WorkoutSession[]>([])
@@ -35,20 +36,20 @@ export default function App() {
   const [persisted, setPersisted] = useState<boolean | null>(null)
 
   useEffect(() => {
-    const subscriptions = [
-      liveQuery(() => db.routines.orderBy('order').toArray()).subscribe({ next: setRoutines, error: () => setToast('無法讀取菜單') }),
-      liveQuery(() => db.sessions.orderBy('startedAt').reverse().toArray()).subscribe({ next: setSessions, error: () => setToast('無法讀取訓練紀錄') }),
-      liveQuery(() => db.settings.get('main')).subscribe({ next: (value) => value && setSettings(value), error: () => setToast('無法讀取設定') }),
-    ]
     let cancelled = false
-    void db.sessions.where('status').equals('active').first().then((session) => {
-      if (!cancelled && session) {
+    const unsubscribe = repository.subscribe((data) => {
+      setRoutines(data.routines)
+      setSessions(data.sessions)
+      setSettings(data.settings)
+    }, () => setToast('無法讀取訓練資料'))
+    void repository.getActiveSession().then((session) => {
+      if (!cancelled && session && !activeRef.current) {
         activeRef.current = session
         setActiveSession(session)
       }
-    })
-    return () => { cancelled = true; subscriptions.forEach((subscription) => subscription.unsubscribe()) }
-  }, [])
+    }).catch(() => setToast('無法讀取未完成訓練'))
+    return () => { cancelled = true; unsubscribe() }
+  }, [repository])
 
   useEffect(() => {
     if (!toast) return
@@ -78,7 +79,7 @@ export default function App() {
     const next = updater(activeRef.current)
     activeRef.current = next
     setActiveSession(next)
-    writeQueue.current = writeQueue.current.catch(() => undefined).then(() => db.sessions.put(next)).catch(() => {
+    writeQueue.current = writeQueue.current.catch(() => undefined).then(() => repository.saveSession(next)).catch(() => {
       setToast('儲存失敗，請先匯出備份並重新整理')
     })
   }
@@ -92,7 +93,7 @@ export default function App() {
     const previous = completed.find((session) => session.routineId === routine.id)
     const next = makeSession(routine, previous)
     try {
-      await db.sessions.put(next)
+      await repository.saveSession(next)
       activeRef.current = next
       setActiveSession(next)
       setScreen('workout')
@@ -109,7 +110,7 @@ export default function App() {
     const finished: WorkoutSession = { ...current, status: 'completed', endedAt: new Date().toISOString(), restEndsAt: null }
     try {
       await writeQueue.current
-      await db.sessions.put(finished)
+      await repository.saveSession(finished)
       activeRef.current = null
       setActiveSession(null)
       setScreen('history')
@@ -124,7 +125,7 @@ export default function App() {
     const current = activeRef.current
     if (!current || !window.confirm('確定捨棄這次訓練？已輸入的組別會刪除。')) return
     await writeQueue.current
-    await db.sessions.delete(current.id)
+    await repository.deleteSession(current.id)
     activeRef.current = null
     setActiveSession(null)
     setScreen('home')
@@ -199,7 +200,7 @@ export default function App() {
     if (!routine.name.trim()) { setToast('請輸入菜單名稱'); return }
     if (routine.exercises.some((exercise) => !exercise.name.trim())) { setToast('請填寫所有動作名稱'); return }
     const next = { ...routine, name: routine.name.trim(), updatedAt: new Date().toISOString() }
-    await db.routines.put(next)
+    await repository.saveRoutine(next)
     setSelectedRoutineId(next.id)
     setEditingRoutine(null)
     setScreen('routine')
@@ -208,7 +209,7 @@ export default function App() {
 
   async function deleteRoutine(routine: Routine) {
     if (!window.confirm(`確定刪除「${routine.name}」菜單？過去的訓練紀錄會保留。`)) return
-    await db.routines.delete(routine.id)
+    await repository.deleteRoutine(routine.id)
     setSelectedRoutineId(null)
     setScreen('home')
     setToast('菜單已刪除')
@@ -216,20 +217,20 @@ export default function App() {
 
   async function deleteHistory(session: WorkoutSession) {
     if (!window.confirm('確定刪除這次訓練紀錄？')) return
-    await db.sessions.delete(session.id)
+    await repository.deleteSession(session.id)
     setHistoryDetailId(null)
     setToast('紀錄已刪除')
   }
 
   async function changeSettings(patch: Partial<AppSettings>) {
-    await db.settings.put({ ...settings, ...patch })
+    await repository.saveSettings({ ...settings, ...patch })
   }
 
   async function handleImport(file: File) {
     if (!window.confirm('匯入備份會取代目前所有菜單和訓練紀錄。確定繼續嗎？')) return
     try {
-      await importBackup(file)
-      const resumed = await db.sessions.where('status').equals('active').first() ?? null
+      await importBackup(file, repository)
+      const resumed = await repository.getActiveSession()
       activeRef.current = resumed
       setActiveSession(resumed)
       setScreen('home')
@@ -269,7 +270,7 @@ export default function App() {
       {screen === 'progress' && <ProgressScreen sessions={completed} unit={settings.unit} />}
       {screen === 'settings' && <SettingsScreen
         settings={settings} persisted={persisted} onChange={(patch) => void changeSettings(patch)}
-        onExport={() => void exportBackup()} onExportCsv={() => void exportCsv()}
+        onExport={() => void exportBackup(repository)} onExportCsv={() => void exportCsv(repository)}
         onImport={() => importInput.current?.click()}
         onRequestPersistence={async () => {
           if (!navigator.storage?.persist) { setToast('此瀏覽器不支援持久儲存設定'); return }

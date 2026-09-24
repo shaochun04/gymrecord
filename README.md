@@ -33,3 +33,9 @@ npm run dev
 ## 資料結構
 
 菜單含動作與預設值。開始訓練時建立當次快照，保存每一組的實際重量、次數與完成狀態，因此修改菜單不會更動過去紀錄。重量在資料庫中以公斤儲存，顯示時依設定換算。
+
+## 資料存取架構
+
+畫面只透過 `src/data/workoutRepository.ts` 的 `WorkoutRepository` 讀寫訓練資料。網頁版由 `IndexedDbWorkoutRepository` 使用原本的 `gymrecord` IndexedDB 資料庫，保留既有紀錄與資料庫版本。這個介面負責菜單、訓練、設定的存取與變更通知，也負責一次性讀取及原子還原完整資料；備份格式仍是版本 1 的 JSON。
+
+之後做 Android APK 時，可在啟動處換成 SQLite adapter，維持同一組資料模型和 `WorkoutRepository` 介面。這只共用資料操作方式，不會讓瀏覽器與手機資料自動同步；離線轉移仍使用 JSON 匯出與匯入。手機版還需處理原生檔案選取與分享，才能完成備份流程。

@@ -2,14 +2,15 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import App from './App'
-import { initializeDatabase } from './db'
+import { IndexedDbWorkoutRepository } from './data/indexedDbWorkoutRepository'
 import './styles.css'
 
 async function start() {
   try {
-    await initializeDatabase()
+    const repository = new IndexedDbWorkoutRepository()
+    await repository.initialize()
     ReactDOM.createRoot(document.getElementById('root')!).render(
-      <React.StrictMode><App /></React.StrictMode>,
+      <React.StrictMode><App repository={repository} /></React.StrictMode>,
     )
     registerSW({ immediate: true })
   } catch (error) {

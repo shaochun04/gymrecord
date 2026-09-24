@@ -12,11 +12,15 @@ import { ActiveSessionExistsError, type WorkoutRepository } from './data/workout
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import { createId } from './id'
 import {
+  adjustReps, adjustWeightKg, completedWorkingVolumeKg, durationMinutes, findPreviousPerformance,
+  formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
+} from './workoutLogic'
+import {
   completedSetCount, displayWeight, exerciseKey, formatDate, localDateKey, plannedSetCount,
   weightToKg,
 } from './utils'
 
-type Screen = 'home' | 'routine' | 'workout' | 'history' | 'progress' | 'settings'
+type Screen = 'home' | 'routine' | 'workout' | 'summary' | 'history' | 'progress' | 'settings'
 
 const blankSettings: AppSettings = { id: 'main', unit: 'kg', restTimerEnabled: true }
 
@@ -30,12 +34,12 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   const [historyDetailId, setHistoryDetailId] = useState<string | null>(null)
   const [showAddExercise, setShowAddExercise] = useState(false)
   const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null)
+  const [summarySession, setSummarySession] = useState<WorkoutSession | null>(null)
   const activeRef = useRef<WorkoutSession | null>(null)
   const startingRef = useRef(false)
   const writeQueue = useRef<Promise<unknown>>(Promise.resolve())
   const importInput = useRef<HTMLInputElement>(null)
   const [toast, setToast] = useState('')
-  const [now, setNow] = useState(Date.now())
   const [persisted, setPersisted] = useState<boolean | null>(null)
 
   useEffect(() => {
@@ -61,12 +65,6 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   }, [toast])
 
   useEffect(() => {
-    if (!activeSession) return
-    const interval = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(interval)
-  }, [activeSession?.id])
-
-  useEffect(() => {
     if (screen !== 'settings' || !navigator.storage?.persisted) return
     void navigator.storage.persisted().then(setPersisted)
   }, [screen])
@@ -75,7 +73,6 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   const selectedRoutine = routines.find((routine) => routine.id === selectedRoutineId)
   const historyDetail = sessions.find((session) => session.id === historyDetailId)
   const currentWeekCount = completed.filter((session) => Date.now() - new Date(session.startedAt).getTime() < 7 * 86400000).length
-  const restRemaining = activeSession?.restEndsAt ? Math.max(0, Math.ceil((activeSession.restEndsAt - now) / 1000)) : 0
 
   function updateSession(updater: (session: WorkoutSession) => WorkoutSession) {
     if (!activeRef.current) return
@@ -135,8 +132,9 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       await repository.saveSession(finished)
       activeRef.current = null
       setActiveSession(null)
-      setScreen('history')
-      setHistoryDetailId(finished.id)
+      setSummarySession(finished)
+      setScreen('summary')
+      window.scrollTo(0, 0)
       setToast('訓練已儲存')
     } catch {
       setToast('儲存失敗，請再試一次')
@@ -168,13 +166,12 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
     const done = !set.done
     updateSession((current) => ({
       ...current,
-      restEndsAt: done && settings.restTimerEnabled ? Date.now() + exercise.restSeconds * 1000 : current.restEndsAt,
+      restEndsAt: nextRestEndAfterToggle(set, settings.restTimerEnabled, exercise.restSeconds, Date.now(), current.restEndsAt),
       exercises: current.exercises.map((item) => item.id !== exercise.id ? item : {
         ...item,
         sets: item.sets.map((row) => row.id === set.id ? { ...row, done } : row),
       }),
     }))
-    setNow(Date.now())
   }
 
   function addSet(exerciseId: string) {
@@ -183,10 +180,15 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       exercises: current.exercises.map((exercise) => {
         if (exercise.id !== exerciseId) return exercise
         const last = exercise.sets.at(-1)
+        const source = routines.find((routine) => routine.id === current.routineId)?.exercises.find((item) =>
+          item.id === exercise.sourceExerciseId ||
+          (!exercise.sourceExerciseId && item.name === exercise.name && item.equipment === exercise.equipment),
+        )
         return {
           ...exercise,
           sets: [...exercise.sets, {
-            id: createId(), weight: last?.weight ?? null, reps: last?.reps ?? null,
+            id: createId(), weight: last ? last.weight : source?.weight ?? null,
+            reps: last ? last.reps : source?.reps ?? null,
             done: false, kind: 'working' as const,
           }],
         }
@@ -281,13 +283,16 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         onEdit={() => setEditingRoutine(selectedRoutine)} onDelete={() => void deleteRoutine(selectedRoutine)}
       />}
       {screen === 'workout' && activeSession && <WorkoutScreen
-        session={activeSession} previousSessions={completed} unit={settings.unit} restRemaining={restRemaining} now={now}
+        session={activeSession} previousSessions={completed} unit={settings.unit}
         onBack={() => setScreen('home')} onFinish={() => void finishSession()}
         onDiscard={() => void discardSession()}
         onUpdateSet={updateSet} onToggleSet={toggleSet} onAddSet={addSet} onRemoveSet={removeSet}
         onAddExercise={() => setShowAddExercise(true)}
         onDismissTimer={() => updateSession((current) => ({ ...current, restEndsAt: null }))}
+        onShiftTimer={(seconds) => updateSession((current) => ({ ...current, restEndsAt: shiftRestEnd(current.restEndsAt, seconds, Date.now()) }))}
+        onExpireTimer={() => updateSession((current) => current.restEndsAt && current.restEndsAt <= Date.now() ? { ...current, restEndsAt: null } : current)}
       />}
+      {screen === 'summary' && summarySession && <WorkoutSummary session={summarySession} onHome={() => setScreen('home')} onHistory={() => { setScreen('history'); setHistoryDetailId(summarySession.id) }} />}
       {screen === 'history' && <HistoryScreen sessions={completed} onOpen={setHistoryDetailId} />}
       {screen === 'progress' && <ProgressScreen sessions={completed} unit={settings.unit} />}
       {screen === 'settings' && <SettingsScreen
@@ -301,7 +306,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
           setToast(result ? '已加強本機資料保存' : '瀏覽器未啟用持久儲存，請定期匯出備份')
         }}
       />}
-      {!['routine', 'workout'].includes(screen) && <BottomNav screen={screen} onChange={setScreen} />}
+      {!['routine', 'workout', 'summary'].includes(screen) && <BottomNav screen={screen} onChange={setScreen} />}
       {editingRoutine && <RoutineEditor
         routine={editingRoutine} unit={settings.unit} onClose={() => setEditingRoutine(null)}
         onSave={(routine) => void saveRoutine(routine)}
@@ -413,23 +418,10 @@ function RoutineScreen({ routine, unit, sessions, onBack, onStart, onEdit, onDel
   </main>
 }
 
-function previousPerformance(exercise: SessionExercise, sessions: WorkoutSession[]) {
-  for (const session of sessions) {
-    const match = session.exercises.find((item) =>
-      (item.sourceExerciseId === exercise.sourceExerciseId || exerciseKey(item.name, item.equipment) === exerciseKey(exercise.name, exercise.equipment)) &&
-      item.sets.some((set) => set.done && set.kind === 'working'),
-    )
-    if (match) return { date: session.startedAt, sets: match.sets.filter((set) => set.done && set.kind === 'working') }
-  }
-  return null
-}
-
-function WorkoutScreen({ session, previousSessions, unit, restRemaining, now, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onDismissTimer }: {
+function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onDismissTimer, onShiftTimer, onExpireTimer }: {
   session: WorkoutSession
   previousSessions: WorkoutSession[]
   unit: AppSettings['unit']
-  restRemaining: number
-  now: number
   onBack: () => void
   onFinish: () => void
   onDiscard: () => void
@@ -439,34 +431,43 @@ function WorkoutScreen({ session, previousSessions, unit, restRemaining, now, on
   onRemoveSet: (exerciseId: string, setId: string) => void
   onAddExercise: () => void
   onDismissTimer: () => void
+  onShiftTimer: (seconds: number) => void
+  onExpireTimer: () => void
 }) {
   const completed = completedSetCount(session)
   const planned = plannedSetCount(session)
-  const elapsed = Math.max(0, Math.floor((now - new Date(session.startedAt).getTime()) / 60000))
   return <main className="page workout-page">
     <div className="content-wrap">
       <header className="detail-topbar"><button className="icon-button" onClick={onBack} aria-label="返回首頁"><ArrowLeft size={22} /></button>
         <span className="topbar-title"><span className="live-dot" /> 訓練進行中</span>
         <button className="topbar-link" onClick={onFinish}>完成</button></header>
-      <div className="workout-heading"><div><span className="eyebrow">TODAY'S SESSION</span><h1>{session.routineName}</h1><p>{formatDate(session.startedAt)} <span className="middle-dot">·</span> 已訓練 {elapsed} 分鐘</p></div>
+      <div className="workout-heading"><div><span className="eyebrow">TODAY'S SESSION</span><h1>{session.routineName}</h1><p>{formatDate(session.startedAt)} <span className="middle-dot">·</span> 已訓練 <WorkoutElapsed startedAt={session.startedAt} /></p></div>
         <div className="workout-ring"><span>{completed}<small>/{planned}</small></span><svg viewBox="0 0 80 80"><circle cx="40" cy="40" r="34" /><circle className="ring-fill" cx="40" cy="40" r="34" style={{ strokeDasharray: `${planned ? completed / planned * 214 : 0} 214` }} /></svg></div></div>
       <div className="workout-progress-track"><span style={{ width: `${planned ? completed / planned * 100 : 0}%` }} /></div>
       <p className="workout-progress-caption">已完成 {completed} / {planned} 組 <span>每完成一組，紀錄會自動儲存</span></p>
 
-      {restRemaining > 0 && <div className="rest-banner"><span className="rest-icon"><Timer size={21} /></span><span><strong>休息計時</strong><small>準備好就繼續下一組</small></span><b>{String(Math.floor(restRemaining / 60)).padStart(2, '0')}:{String(restRemaining % 60).padStart(2, '0')}</b><button onClick={onDismissTimer} aria-label="結束計時"><X size={19} /></button></div>}
+      {session.restEndsAt !== null && <RestTimer restEndsAt={session.restEndsAt} onShift={onShiftTimer} onSkip={onDismissTimer} onExpire={onExpireTimer} />}
 
       <div className="workout-exercises">
         {session.exercises.map((exercise, exerciseIndex) => {
           const done = exercise.sets.filter((set) => set.done).length
-          const previous = previousPerformance(exercise, previousSessions)
+          const previous = findPreviousPerformance(exercise, previousSessions, session.id)
           return <section className="workout-exercise-card" key={exercise.id}>
-            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}{exercise.note && ` · ${exercise.note}`}</p></div><span className="set-count">{done}/{exercise.sets.length}</span></div>
+            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}</p>{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
             {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下</span>)}</div></div>}
             <div className="set-table-header"><span>組別</span><span>重量 <small>{unit}</small></span><span>次數</span><span>完成</span><span /></div>
             <div className="set-table-body">{exercise.sets.map((set, index) => <div className={`set-row ${set.done ? 'is-done' : ''}`} key={set.id}>
               <button className={`set-kind ${set.kind === 'warmup' ? 'is-warmup' : ''}`} title="點擊切換暖身／正式組" onClick={() => onUpdateSet(exercise.id, set.id, { kind: set.kind === 'warmup' ? 'working' : 'warmup' })}><b>{index + 1}</b><small>{set.kind === 'warmup' ? '暖身' : '正式'}</small></button>
-              <NumberInput ariaLabel={`${exercise.name} 第 ${index + 1} 組重量`} value={displayWeight(set.weight, unit)} placeholder="—" onChange={(value) => onUpdateSet(exercise.id, set.id, { weight: weightToKg(value, unit) })} />
-              <NumberInput ariaLabel={`${exercise.name} 第 ${index + 1} 組次數`} value={set.reps === null ? '' : String(set.reps)} placeholder="—" integer onChange={(value) => onUpdateSet(exercise.id, set.id, { reps: value })} />
+              <NumberInput ariaLabel={`${exercise.name} 第 ${index + 1} 組重量`} quickLabel={`重量 ${unit}`} value={displayWeight(set.weight, unit)} placeholder="—" onChange={(value) => onUpdateSet(exercise.id, set.id, { weight: weightToKg(value, unit) })} onStep={(direction) => {
+                const kg = adjustWeightKg(set.weight, unit, direction)
+                onUpdateSet(exercise.id, set.id, { weight: kg })
+                return displayWeight(kg, unit)
+              }} />
+              <NumberInput ariaLabel={`${exercise.name} 第 ${index + 1} 組次數`} quickLabel="次數" value={set.reps === null ? '' : String(set.reps)} placeholder="—" integer onChange={(value) => onUpdateSet(exercise.id, set.id, { reps: value })} onStep={(direction) => {
+                const reps = adjustReps(set.reps, direction)
+                onUpdateSet(exercise.id, set.id, { reps })
+                return String(reps)
+              }} />
               <button className={`set-check ${set.done ? 'checked' : ''}`} onClick={() => onToggleSet(exercise, set)} aria-label={set.done ? '取消完成' : '完成這組'}><Check size={20} strokeWidth={3} /></button>
               <button className="remove-set" onClick={() => onRemoveSet(exercise.id, set.id)} aria-label="刪除這組"><Minus size={15} /></button>
             </div>)}</div>
@@ -479,6 +480,65 @@ function WorkoutScreen({ session, previousSessions, unit, restRemaining, now, on
     </div>
     <div className="sticky-action"><div className="sticky-action-inner"><button className="primary-button" onClick={onFinish}><CheckCircle2 size={20} /> 結束並儲存訓練 <ArrowRight size={19} /></button></div></div>
   </main>
+}
+
+function WorkoutElapsed({ startedAt }: { startedAt: string }) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const refresh = () => setNow(Date.now())
+    const interval = window.setInterval(refresh, 15000)
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
+  return <>{formatDuration(durationMinutes(startedAt, now))}</>
+}
+
+function RestTimer({ restEndsAt, onShift, onSkip, onExpire }: {
+  restEndsAt: number
+  onShift: (seconds: number) => void
+  onSkip: () => void
+  onExpire: () => void
+}) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const refresh = () => setNow(Date.now())
+    refresh()
+    const interval = window.setInterval(refresh, 1000)
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [restEndsAt])
+  const remaining = remainingRestSeconds(restEndsAt, now)
+  useEffect(() => {
+    if (remaining === 0) onExpire()
+  }, [remaining, onExpire])
+  if (remaining === 0) return null
+  return <div className="rest-banner" role="timer" aria-label="休息倒數">
+    <span className="rest-icon"><Timer size={21} /></span>
+    <span className="rest-copy"><strong>休息計時</strong><small>準備好就繼續下一組</small></span>
+    <b>{String(Math.floor(remaining / 60)).padStart(2, '0')}:{String(remaining % 60).padStart(2, '0')}</b>
+    <div className="rest-controls"><button onClick={() => onShift(-15)} aria-label="休息減少 15 秒">-15</button><button onClick={() => onShift(15)} aria-label="休息增加 15 秒">+15</button><button onClick={onSkip} aria-label="跳過休息">跳過</button></div>
+  </div>
+}
+
+function WorkoutSummary({ session, onHome, onHistory }: { session: WorkoutSession, onHome: () => void, onHistory: () => void }) {
+  const volume = completedWorkingVolumeKg(session)
+  return <main className="page summary-page"><div className="content-wrap">
+    <BrandHeader eyebrow="訓練已完成" />
+    <div className="summary-hero"><span className="summary-icon"><CheckCircle2 size={35} /></span><span className="eyebrow">WORKOUT COMPLETE</span><h1>{session.routineName}</h1><p>{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric' })}</p></div>
+    <div className="summary-stats"><div><Clock3 size={20} /><span>訓練時間</span><strong>{formatDuration(durationMinutes(session.startedAt, session.endedAt ?? session.startedAt))}</strong></div><div><CheckCircle2 size={20} /><span>完成組數</span><strong>{completedSetCount(session)} / {plannedSetCount(session)}</strong></div><div><Dumbbell size={20} /><span>訓練量</span><strong>{new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 1 }).format(volume)} <small>kg</small></strong></div></div>
+    <button className="primary-button summary-primary" onClick={onHome}>完成，回首頁 <ArrowRight size={19} /></button>
+    <button className="summary-secondary" onClick={onHistory}>查看這次訓練紀錄</button>
+  </div></main>
 }
 
 function HistoryScreen({ sessions, onOpen }: {
@@ -644,14 +704,14 @@ function HistoryDetail({ session, unit, onClose, onDelete }: {
   onClose: () => void
   onDelete: () => void
 }) {
-  const duration = session.endedAt ? Math.max(0, Math.round((new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()) / 60000)) : 0
+  const duration = formatDuration(durationMinutes(session.startedAt, session.endedAt ?? session.startedAt))
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <div className="sheet detail-sheet" role="dialog" aria-modal="true" aria-label="訓練詳情">
       <div className="sheet-header"><div><span className="eyebrow">WORKOUT DETAIL</span><h2>{session.routineName}</h2></div><button className="icon-button" onClick={onClose} aria-label="關閉"><X size={21} /></button></div>
       <div className="sheet-scroll">
         <p className="sheet-date">{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
-        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>分鐘</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
-        <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{exercise.equipment || '未設定器材'}</small></div></div>
+        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>訓練時間</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
+        <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{exercise.equipment || '未設定器材'}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
           <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
         </section>)}</div>
         <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這筆紀錄</button>
@@ -726,25 +786,36 @@ function AddExerciseModal({ unit, onClose, onAdd }: {
   </div>
 }
 
-function NumberInput({ value, onChange, placeholder, ariaLabel, integer = false }: {
+function NumberInput({ value, onChange, placeholder, ariaLabel, integer = false, quickLabel, onStep }: {
   value: string
   onChange: (value: number | null) => void
   placeholder: string
   ariaLabel: string
   integer?: boolean
+  quickLabel?: string
+  onStep?: (direction: -1 | 1) => string
 }) {
   const [raw, setRaw] = useState(value)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (document.activeElement !== inputRef.current) setRaw(value)
   }, [value])
-  return <input ref={inputRef} className="number-input" type="text" inputMode={integer ? 'numeric' : 'decimal'}
+  const input = <input ref={inputRef} className="number-input" type="text" inputMode={integer ? 'numeric' : 'decimal'}
     aria-label={ariaLabel} value={raw} placeholder={placeholder}
     onChange={(event) => {
       const next = event.target.value.replace(',', '.')
-      if (!/^\d*(?:\.\d*)?$/.test(next)) return
+      if (!(integer ? /^\d*$/.test(next) : /^\d*(?:\.\d*)?$/.test(next))) return
       setRaw(next)
       onChange(next === '' || next === '.' ? null : Number(next))
     }}
     onBlur={() => setRaw(value)} />
+  if (!onStep) return input
+  const step = (direction: -1 | 1) => setRaw(onStep(direction))
+  const stepButton = (direction: -1 | 1) => <button type="button"
+    aria-label={`${ariaLabel}${direction < 0 ? '減少' : '增加'}`}
+    onPointerDown={(event) => { event.preventDefault(); step(direction) }}
+    onClick={(event) => { if (event.detail === 0) step(direction) }}>
+    {direction < 0 ? <Minus size={17} /> : <Plus size={17} />}
+  </button>
+  return <div className="number-stepper"><span className="number-stepper-label">{quickLabel}</span>{stepButton(-1)}{input}{stepButton(1)}</div>
 }

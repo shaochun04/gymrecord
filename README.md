@@ -36,6 +36,10 @@ npm run dev
 
 ## 資料存取架構
 
-畫面只透過 `src/data/workoutRepository.ts` 的 `WorkoutRepository` 讀寫訓練資料。網頁版由 `IndexedDbWorkoutRepository` 使用原本的 `gymrecord` IndexedDB 資料庫，保留既有紀錄與資料庫版本。這個介面負責菜單、訓練、設定的存取與變更通知，也負責一次性讀取及原子還原完整資料；備份格式仍是版本 1 的 JSON。
+畫面透過 `src/data/workoutRepository.ts` 的 `WorkoutRepository` 讀寫訓練資料，透過獨立的 `WorkoutChangeSource` 接收資料變更。網頁版由 IndexedDB adapter 使用原本的 `gymrecord` 資料庫與 v1 schema，保留既有紀錄。菜單與 session 可分開查詢；`readAll()` 只供一致性的完整備份使用。還原必須在單一 transaction 中完成，任何失敗都要回滾。同一時間最多一筆進行中的訓練。
+
+備份目前仍輸出 v1 JSON。`src/data/backupSchema.ts` 集中處理版本識別、逐版 migration 與欄位驗證；只有全部完成後才呼叫 `replaceAll()`。未來增加 RPE／RIR 等欄位時，再加入 v1→v2 migration，不直接改寫舊版驗證規則。
 
 之後做 Android APK 時，可在啟動處換成 SQLite adapter，維持同一組資料模型和 `WorkoutRepository` 介面。這只共用資料操作方式，不會讓瀏覽器與手機資料自動同步；離線轉移仍使用 JSON 匯出與匯入。手機版還需處理原生檔案選取與分享，才能完成備份流程。
+
+執行 `npm run build` 檢查型別與建置，`npm test` 執行備份與資料庫測試。

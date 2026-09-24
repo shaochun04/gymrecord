@@ -7,8 +7,10 @@ import {
 } from 'lucide-react'
 import { exportBackup, exportCsv, importBackup } from './data/backup'
 import { makeSession } from './data/session'
-import type { WorkoutRepository } from './data/workoutRepository'
+import type { WorkoutChangeSource } from './data/workoutChanges'
+import { ActiveSessionExistsError, type WorkoutRepository } from './data/workoutRepository'
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
+import { createId } from './id'
 import {
   completedSetCount, displayWeight, exerciseKey, formatDate, localDateKey, plannedSetCount,
   weightToKg,
@@ -18,7 +20,7 @@ type Screen = 'home' | 'routine' | 'workout' | 'history' | 'progress' | 'setting
 
 const blankSettings: AppSettings = { id: 'main', unit: 'kg', restTimerEnabled: true }
 
-export default function App({ repository }: { repository: WorkoutRepository }) {
+export default function App({ repository, changes }: { repository: WorkoutRepository, changes: WorkoutChangeSource }) {
   const [screen, setScreen] = useState<Screen>('home')
   const [routines, setRoutines] = useState<Routine[]>([])
   const [sessions, setSessions] = useState<WorkoutSession[]>([])
@@ -29,6 +31,7 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
   const [showAddExercise, setShowAddExercise] = useState(false)
   const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null)
   const activeRef = useRef<WorkoutSession | null>(null)
+  const startingRef = useRef(false)
   const writeQueue = useRef<Promise<unknown>>(Promise.resolve())
   const importInput = useRef<HTMLInputElement>(null)
   const [toast, setToast] = useState('')
@@ -37,19 +40,19 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
 
   useEffect(() => {
     let cancelled = false
-    const unsubscribe = repository.subscribe((data) => {
-      setRoutines(data.routines)
-      setSessions(data.sessions)
-      setSettings(data.settings)
+    const unsubscribe = changes.subscribe((change) => {
+      if (change.kind === 'routines') setRoutines(change.value)
+      if (change.kind === 'sessions') setSessions(change.value)
+      if (change.kind === 'settings') setSettings(change.value)
     }, () => setToast('無法讀取訓練資料'))
     void repository.getActiveSession().then((session) => {
       if (!cancelled && session && !activeRef.current) {
         activeRef.current = session
         setActiveSession(session)
       }
-    }).catch(() => setToast('無法讀取未完成訓練'))
+    }).catch((error) => setToast(error instanceof Error ? error.message : '無法讀取未完成訓練'))
     return () => { cancelled = true; unsubscribe() }
-  }, [repository])
+  }, [repository, changes])
 
   useEffect(() => {
     if (!toast) return
@@ -85,21 +88,40 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
   }
 
   async function startRoutine(routine: Routine) {
+    if (startingRef.current) return
     if (activeRef.current) {
       setScreen('workout')
       setToast('先完成目前的訓練，再開始下一堂')
       return
     }
-    const previous = completed.find((session) => session.routineId === routine.id)
-    const next = makeSession(routine, previous)
+    startingRef.current = true
     try {
+      const existing = await repository.getActiveSession()
+      if (existing) {
+        activeRef.current = existing
+        setActiveSession(existing)
+        setScreen('workout')
+        setToast('先完成目前的訓練，再開始下一堂')
+        return
+      }
+      const previous = completed.find((session) => session.routineId === routine.id)
+      const next = makeSession(routine, previous)
       await repository.saveSession(next)
       activeRef.current = next
       setActiveSession(next)
       setScreen('workout')
       window.scrollTo(0, 0)
-    } catch {
-      setToast('無法建立訓練，請確認本機儲存空間')
+    } catch (error) {
+      if (error instanceof ActiveSessionExistsError) {
+        activeRef.current = error.activeSession
+        setActiveSession(error.activeSession)
+        setScreen('workout')
+        setToast('先完成目前的訓練，再開始下一堂')
+      } else {
+        setToast(error instanceof Error ? error.message : '無法建立訓練，請確認本機儲存空間')
+      }
+    } finally {
+      startingRef.current = false
     }
   }
 
@@ -164,7 +186,7 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
         return {
           ...exercise,
           sets: [...exercise.sets, {
-            id: crypto.randomUUID(), weight: last?.weight ?? null, reps: last?.reps ?? null,
+            id: createId(), weight: last?.weight ?? null, reps: last?.reps ?? null,
             done: false, kind: 'working' as const,
           }],
         }
@@ -185,10 +207,10 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
     updateSession((current) => ({
       ...current,
       exercises: [...current.exercises, {
-        id: crypto.randomUUID(), sourceExerciseId: exercise.id, name: exercise.name,
+        id: createId(), sourceExerciseId: exercise.id, name: exercise.name,
         equipment: exercise.equipment, note: exercise.note, restSeconds: exercise.restSeconds,
         sets: Array.from({ length: exercise.sets }, () => ({
-          id: crypto.randomUUID(), weight: exercise.weight, reps: exercise.reps,
+          id: createId(), weight: exercise.weight, reps: exercise.reps,
           done: false, kind: 'working' as const,
         })),
       }],
@@ -249,7 +271,7 @@ export default function App({ repository }: { repository: WorkoutRepository }) {
         currentWeekCount={currentWeekCount} onOpenRoutine={(id) => { setSelectedRoutineId(id); setScreen('routine') }}
         onResume={() => setScreen('workout')}
         onAddRoutine={() => setEditingRoutine({
-          id: crypto.randomUUID(), name: '', label: '自訂訓練', accent: '#d2f072', order: routines.length,
+          id: createId(), name: '', label: '自訂訓練', accent: '#d2f072', order: routines.length,
           exercises: [], updatedAt: new Date().toISOString(),
         })}
       />}
@@ -657,7 +679,7 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
   }
   function addExercise() {
     setDraft((current) => ({ ...current, exercises: [...current.exercises, {
-      id: crypto.randomUUID(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
+      id: createId(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
     }] }))
   }
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -690,7 +712,7 @@ function AddExerciseModal({ unit, onClose, onAdd }: {
   onAdd: (exercise: RoutineExercise) => void
 }) {
   const [exercise, setExercise] = useState<RoutineExercise>({
-    id: crypto.randomUUID(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
+    id: createId(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
   })
   const patch = (value: Partial<RoutineExercise>) => setExercise((current) => ({ ...current, ...value }))
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>

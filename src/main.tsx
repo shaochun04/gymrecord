@@ -2,7 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import App from './App'
-import { IndexedDbWorkoutRepository } from './data/indexedDbWorkoutRepository'
+import { IndexedDbWorkoutChanges, IndexedDbWorkoutRepository } from './data/indexedDbWorkoutRepository'
 import './styles.css'
 
 async function start() {
@@ -10,7 +10,7 @@ async function start() {
     const repository = new IndexedDbWorkoutRepository()
     await repository.initialize()
     ReactDOM.createRoot(document.getElementById('root')!).render(
-      <React.StrictMode><App repository={repository} /></React.StrictMode>,
+      <React.StrictMode><App repository={repository} changes={new IndexedDbWorkoutChanges()} /></React.StrictMode>,
     )
     registerSW({ immediate: true })
   } catch (error) {

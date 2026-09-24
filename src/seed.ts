@@ -1,4 +1,5 @@
 import type { Routine, RoutineExercise } from './types'
+import { createId } from './id'
 
 function exercise(
   name: string,
@@ -8,7 +9,7 @@ function exercise(
   sets = 3,
   restSeconds = 90,
 ): RoutineExercise {
-  return { id: crypto.randomUUID(), name, equipment, weight, reps, sets, restSeconds, note: '' }
+  return { id: createId(), name, equipment, weight, reps, sets, restSeconds, note: '' }
 }
 
 export function makeInitialRoutines(): Routine[] {

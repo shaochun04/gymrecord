@@ -2,15 +2,15 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { liveQuery } from 'dexie'
 import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, CheckCircle2,
-  ChevronRight, Clock3, Download, Dumbbell, FileDown, FileUp, Flame, History,
+  ChevronLeft, ChevronRight, Clock3, Download, Dumbbell, FileDown, FileUp, Flame, History,
   House, LineChart, Minus, Pencil, Play, Plus, RotateCcw, Settings2,
   ShieldCheck, Timer, Trash2, X,
 } from 'lucide-react'
 import { db, exportBackup, exportCsv, importBackup, makeSession } from './db'
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import {
-  completedSetCount, displayWeight, exerciseKey, formatDate, plannedSetCount,
-  sessionVolume, weightToKg,
+  completedSetCount, displayWeight, exerciseKey, formatDate, localDateKey, plannedSetCount,
+  weightToKg,
 } from './utils'
 
 type Screen = 'home' | 'routine' | 'workout' | 'history' | 'progress' | 'settings'
@@ -265,7 +265,7 @@ export default function App() {
         onAddExercise={() => setShowAddExercise(true)}
         onDismissTimer={() => updateSession((current) => ({ ...current, restEndsAt: null }))}
       />}
-      {screen === 'history' && <HistoryScreen sessions={completed} unit={settings.unit} onOpen={setHistoryDetailId} />}
+      {screen === 'history' && <HistoryScreen sessions={completed} onOpen={setHistoryDetailId} />}
       {screen === 'progress' && <ProgressScreen sessions={completed} unit={settings.unit} />}
       {screen === 'settings' && <SettingsScreen
         settings={settings} persisted={persisted} onChange={(patch) => void changeSettings(patch)}
@@ -444,22 +444,51 @@ function WorkoutScreen({ session, unit, restRemaining, now, onBack, onFinish, on
   </main>
 }
 
-function HistoryScreen({ sessions, unit, onOpen }: {
+function HistoryScreen({ sessions, onOpen }: {
   sessions: WorkoutSession[]
-  unit: AppSettings['unit']
   onOpen: (id: string) => void
 }) {
+  const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1))
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
+  const year = month.getFullYear()
+  const monthIndex = month.getMonth()
+  const monthSessions = sessions.filter((session) => {
+    const date = new Date(session.startedAt)
+    return date.getFullYear() === year && date.getMonth() === monthIndex
+  })
+  const trainedDays = new Set(monthSessions.filter((session) => completedSetCount(session) > 0).map((session) => localDateKey(session.startedAt)))
+  const visibleSessions = selectedDay ? monthSessions.filter((session) => localDateKey(session.startedAt) === selectedDay) : monthSessions
+  const leadingDays = (month.getDay() + 6) % 7
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate()
   const totalSets = sessions.reduce((sum, session) => sum + completedSetCount(session), 0)
+  function changeMonth(offset: number) {
+    setMonth(new Date(year, monthIndex + offset, 1))
+    setSelectedDay(null)
+  }
   return <main className="page page-with-nav"><div className="content-wrap">
     <BrandHeader eyebrow="訓練檔案" />
     <div className="page-title"><span className="eyebrow">YOUR JOURNEY</span><h1>訓練紀錄<span className="title-dot">.</span></h1><p>每一次完成，都有跡可循。</p></div>
     <div className="history-summary"><div><span>累積訓練</span><strong>{sessions.length}<small>次</small></strong></div><div><span>完成組數</span><strong>{totalSets}<small>組</small></strong></div><div className="history-summary-icon"><History size={33} strokeWidth={1.5} /></div></div>
-    <div className="section-heading compact"><div><span className="eyebrow">WORKOUT LOG</span><h2>所有紀錄</h2></div><span className="count-chip">{sessions.length} 筆</span></div>
-    {sessions.length === 0 ? <EmptyState icon={<History size={32} />} title="第一筆紀錄，從今天開始" description="完成一次訓練後，這裡會列出你的重量與組數。" /> :
-      <div className="history-list">{sessions.map((session) => <button className="history-card" key={session.id} onClick={() => onOpen(session.id)}>
+    <section className="calendar-card" aria-label="訓練日曆">
+      <div className="calendar-header"><div><span className="eyebrow">TRAINING CALENDAR</span><h2>{year} 年 {monthIndex + 1} 月</h2></div><div className="calendar-controls"><button onClick={() => changeMonth(-1)} aria-label="上個月"><ChevronLeft size={19} /></button><button onClick={() => changeMonth(1)} aria-label="下個月"><ChevronRight size={19} /></button></div></div>
+      <div className="calendar-month-count"><span className="calendar-count-dot" />本月訓練 <strong>{trainedDays.size}</strong> 天</div>
+      <div className="calendar-grid">
+        {['一', '二', '三', '四', '五', '六', '日'].map((day) => <span className="calendar-weekday" key={day}>{day}</span>)}
+        {Array.from({ length: leadingDays }, (_, index) => <span className="calendar-spacer" key={`blank-${index}`} />)}
+        {Array.from({ length: daysInMonth }, (_, index) => {
+          const day = index + 1
+          const key = localDateKey(new Date(year, monthIndex, day))
+          const trained = trainedDays.has(key)
+          return <button key={key} className={`calendar-day${trained ? ' trained' : ''}${selectedDay === key ? ' selected' : ''}${key === localDateKey(new Date()) ? ' today' : ''}`} onClick={() => setSelectedDay(selectedDay === key ? null : key)} aria-label={`${monthIndex + 1} 月 ${day} 日${trained ? '，有訓練' : '，無訓練'}`} aria-pressed={selectedDay === key}><span>{day}</span>{trained && <i aria-hidden="true" />}</button>
+        })}
+      </div>
+    </section>
+    <div className="section-heading compact"><div><span className="eyebrow">WORKOUT LOG</span><h2>{selectedDay ? `${monthIndex + 1} 月 ${Number(selectedDay.slice(-2))} 日` : '本月紀錄'}</h2></div><span className="count-chip">{visibleSessions.length} 筆</span></div>
+    {visibleSessions.length === 0 ? <EmptyState icon={<CalendarDays size={32} />} title={selectedDay ? '這天沒有訓練紀錄' : '這個月還沒有訓練紀錄'} description="完成訓練後，可以在日曆選擇日期查看重量與組數。" /> :
+      <div className="history-list">{visibleSessions.map((session) => <button className="history-card" key={session.id} onClick={() => onOpen(session.id)}>
         <div className="history-date"><strong>{new Date(session.startedAt).getDate().toString().padStart(2, '0')}</strong><small>{new Intl.DateTimeFormat('en', { month: 'short' }).format(new Date(session.startedAt)).toUpperCase()}</small></div>
         <div className="history-card-main"><strong>{session.routineName}</strong><small>{session.exercises.length} 個動作 <span>·</span> {completedSetCount(session)} 組完成</small></div>
-        <div className="history-card-end"><span>{Math.round(sessionVolume(session) * (unit === 'lb' ? 2.2046226218 : 1)).toLocaleString()} {unit}</span><ChevronRight size={18} /></div>
+        <div className="history-card-end"><ChevronRight size={18} /></div>
       </button>)}</div>}
   </div></main>
 }
@@ -467,7 +496,7 @@ function HistoryScreen({ sessions, unit, onOpen }: {
 function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: AppSettings['unit'] }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const records = useMemo(() => {
-    const map = new Map<string, { key: string, name: string, equipment: string, points: { date: string, max: number, volume: number }[] }>()
+    const map = new Map<string, { key: string, name: string, equipment: string, points: { date: string, max: number }[] }>()
     for (const session of [...sessions].reverse()) {
       for (const exercise of session.exercises) {
         const done = exercise.sets.filter((set) => set.done && set.kind === 'working' && set.weight !== null)
@@ -477,7 +506,6 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
         current.points.push({
           date: session.startedAt,
           max: Math.max(...done.map((set) => set.weight ?? 0)),
-          volume: done.reduce((sum, set) => sum + (set.weight ?? 0) * (set.reps ?? 0), 0),
         })
         map.set(key, current)
       }
@@ -500,7 +528,7 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
           <ProgressChart values={chosen.points.map((point) => point.max * converter)} />
           <div className="chart-labels"><span>{formatDate(chosen.points[0].date, { month: 'numeric', day: 'numeric' })}</span><span>{formatDate(chosen.points.at(-1)!.date, { month: 'numeric', day: 'numeric' })}</span></div>
         </div>
-        <div className="progress-stat-grid"><div className="progress-stat"><span>最近一次最高重量</span><strong>{Math.round((current?.max ?? 0) * converter * 10) / 10}<small> {unit}</small></strong></div><div className="progress-stat"><span>最近一次訓練量</span><strong>{Math.round((current?.volume ?? 0) * converter).toLocaleString()}<small> {unit}</small></strong></div></div>
+        <div className="progress-stat-grid"><div className="progress-stat"><span>最近一次最高重量</span><strong>{Math.round((current?.max ?? 0) * converter * 10) / 10}<small> {unit}</small></strong></div></div>
         <div className="section-heading compact"><div><span className="eyebrow">HISTORY</span><h2>歷次表現</h2></div></div>
         <div className="progress-history">{[...chosen.points].reverse().map((point, index) => <div key={`${point.date}-${index}`}><span>{formatDate(point.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span><strong>{Math.round(point.max * converter * 10) / 10} {unit}</strong></div>)}</div>
       </>}
@@ -585,7 +613,7 @@ function HistoryDetail({ session, unit, onClose, onDelete }: {
       <div className="sheet-header"><div><span className="eyebrow">WORKOUT DETAIL</span><h2>{session.routineName}</h2></div><button className="icon-button" onClick={onClose} aria-label="關閉"><X size={21} /></button></div>
       <div className="sheet-scroll">
         <p className="sheet-date">{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
-        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>分鐘</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{Math.round(sessionVolume(session) * (unit === 'lb' ? 2.2046226218 : 1)).toLocaleString()}</strong><span>{unit} 訓練量</span></div></div>
+        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>分鐘</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
         <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{exercise.equipment || '未設定器材'}</small></div></div>
           <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
         </section>)}</div>

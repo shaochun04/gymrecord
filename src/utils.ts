@@ -25,10 +25,9 @@ export function plannedSetCount(session: WorkoutSession) {
   return session.exercises.reduce((total, exercise) => total + exercise.sets.length, 0)
 }
 
-export function sessionVolume(session: WorkoutSession) {
-  return session.exercises.reduce((total, exercise) => total + exercise.sets.reduce(
-    (subtotal, set) => subtotal + (set.done && set.kind === 'working' ? (set.weight ?? 0) * (set.reps ?? 0) : 0), 0,
-  ), 0)
+export function localDateKey(value: string | Date) {
+  const date = typeof value === 'string' ? new Date(value) : value
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
 export function exerciseKey(name: string, equipment: string) {

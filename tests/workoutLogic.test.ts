@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionExercise, SetLog, WorkoutSession } from '../src/types'
+import type { Routine, SessionExercise, SetLog, WorkoutSession } from '../src/types'
+import { makeSession } from '../src/data/session'
 import { displayWeight } from '../src/utils'
 import {
-  adjustReps, adjustWeightKg, completedWorkingVolumeKg, durationMinutes, findPreviousPerformance,
+  adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
+  findExerciseHistory, findPreviousPerformance,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from '../src/workoutLogic'
 
@@ -31,9 +33,9 @@ describe('上次訓練紀錄', () => {
     const mismatch = session('newest', '2026-08-05T10:00:00Z', [exercise('other', 'source-2', [set('wrong', 30, 8)])])
     const legacy = session('legacy', '2026-08-04T10:00:00Z', [exercise('legacy-exercise', '', [set('legacy-set', 21, 10)])])
     const exact = session('exact', '2026-08-03T10:00:00Z', [exercise('same-source', 'source-1', [set('exact-set', 20, 10)], '舊名稱')])
-    expect(findPreviousPerformance(current, [mismatch, legacy, exact])?.sets[0].id).toBe('legacy-set')
-    expect(findPreviousPerformance(current, [mismatch, exact])?.sets[0].id).toBe('exact-set')
-    expect(findPreviousPerformance(current, [mismatch])).toBeNull()
+    expect(findPreviousPerformance(current, [mismatch, legacy, exact], undefined, 'newest')?.sets[0].id).toBe('legacy-set')
+    expect(findPreviousPerformance(current, [mismatch, exact], undefined, 'newest')?.sets[0].id).toBe('exact-set')
+    expect(findPreviousPerformance(current, [mismatch], undefined, 'newest')).toBeNull()
   })
 
   it('比較資料是獨立副本，修改本次或回傳值不會改動歷史', () => {
@@ -43,6 +45,69 @@ describe('上次訓練紀錄', () => {
     current.sets.push(set('new', 25, 8, false))
     expect(historical.exercises[0].sets[0].weight).toBe(20)
     expect(findPreviousPerformance(current, [historical])?.sets[0].weight).toBe(20)
+  })
+})
+
+describe('跨菜單預填與完整動作歷史', () => {
+  const routine: Routine = {
+    id: 'push', name: 'Push', label: '', accent: '#fff', order: 0, updatedAt: '2026-09-01T00:00:00Z',
+    exercises: [{ id: 'push-press', name: '啞鈴臥推', equipment: '啞鈴', weight: 15, reps: 8, sets: 4, restSeconds: 90, note: '椅背 30°' }],
+  }
+  const oldPush = session('push', '2026-09-20T10:00:00Z', [exercise('old-push', 'push-press', [set('old', 20, 10)])])
+  const newUpper = session('upper', '2026-09-25T10:00:00Z', [exercise('new-upper', 'upper-press', [
+    set('a', 22, 10), set('b', 22, 10), set('c', 20, 12), set('warm', 10, 12, true, 'warmup'), set('undone', 30, 5, false),
+  ])])
+
+  it('較新的跨菜單紀錄成為每組預填來源，第四組沿用最後一組', () => {
+    const started = makeSession(routine, [oldPush, newUpper])
+    expect(started.exercises[0].sets.map((row) => [row.weight, row.reps])).toEqual([
+      [22, 10], [22, 10], [20, 12], [20, 12],
+    ])
+    expect(started.exercises[0].note).toBe('椅背 30°')
+    expect(findPreviousPerformance(started.exercises[0], [oldPush, newUpper], started.id, routine.id)?.sets.map((row) => row.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('同菜單來源 ID 優先，舊資料缺 ID 時才在同菜單回退名稱與器材', () => {
+    const wrongId = session('push', '2026-09-27T10:00:00Z', [exercise('wrong', 'another-id', [set('wrong-set', 40, 8)])])
+    const legacy = session('push', '2026-09-26T10:00:00Z', [exercise('legacy', '', [set('legacy-set', 21, 11)])])
+    expect(makeSession(routine, [wrongId, legacy, oldPush]).exercises[0].sets[0].weight).toBe(21)
+    expect(makeSession(routine, [wrongId, oldPush]).exercises[0].sets[0].weight).toBe(20)
+  })
+
+  it('沒有歷史時使用菜單預設值；有對應組時保留空值', () => {
+    expect(makeSession(routine).exercises[0].sets[0].weight).toBe(15)
+    const withEmpty = session('push', '2026-09-28T10:00:00Z', [exercise('empty', 'push-press', [set('empty-set', null, 8), set('next', 18, 12)])])
+    expect(makeSession(routine, [withEmpty]).exercises[0].sets.map((row) => [row.weight, row.reps])).toEqual([
+      [null, 8], [18, 12], [18, 12], [18, 12],
+    ])
+  })
+
+  it('跨菜單的新到舊歷史保留暖身標記，排除進行中與未完成組', () => {
+    const active = session('active', '2026-09-26T10:00:00Z', [exercise('active-ex', 'push-press', [set('active-set', 30, 5)])], 'active')
+    const history = findExerciseHistory({ sourceExerciseId: 'push-press', name: '啞鈴臥推', equipment: '啞鈴' }, [oldPush, active, newUpper], routine.id)
+    expect(history.map((entry) => entry.sessionId)).toEqual(['upper', 'push'])
+    expect(history[0].sets.map((row) => [row.id, row.kind])).toEqual([
+      ['a', 'working'], ['b', 'working'], ['c', 'working'], ['warm', 'warmup'],
+    ])
+    expect(history[0].routineName).toBe('upper')
+  })
+})
+
+describe('即時計算 PR', () => {
+  it('只計完成的正式有效組，依重量、同重量次數及 Epley 估算 1RM', () => {
+    const current = exercise('current', 'source-1', [])
+    const history = findExerciseHistory(current, [
+      session('a', '2026-09-20T10:00:00Z', [exercise('a', 'source-1', [set('heavy', 22, 8), set('reps', 20, 12)])]),
+      session('b', '2026-09-25T10:00:00Z', [exercise('b', 'source-1', [set('more-reps', 20, 13), set('warm', 40, 20, true, 'warmup'), set('undone', 50, 10, false), set('zero', 0, 20)])]),
+      session('active', '2026-09-26T10:00:00Z', [exercise('active', 'source-1', [set('active', 60, 5)])], 'active'),
+    ], 'a')
+    const prs = calculateExercisePr(history)
+    expect(prs.weightPr?.id).toBe('heavy')
+    expect(prs.repsPrByWeight).toEqual([{ weightKg: 22, reps: 8 }, { weightKg: 20, reps: 13 }])
+    expect(prs.estimatedOneRepMaxPr?.set.id).toBe('more-reps')
+    expect(prs.estimatedOneRepMaxPr?.estimateKg).toBeCloseTo(20 * (1 + 13 / 30))
+    expect(displayWeight(prs.weightPr!.weight, 'lb')).toBe('48.5')
+    expect(prs.weightPr?.weight).toBe(22)
   })
 })
 

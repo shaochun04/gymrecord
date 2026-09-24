@@ -12,7 +12,8 @@ import { ActiveSessionExistsError, type WorkoutRepository } from './data/workout
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import { createId } from './id'
 import {
-  adjustReps, adjustWeightKg, completedWorkingVolumeKg, durationMinutes, findPreviousPerformance,
+  adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
+  findExerciseHistory, findPreviousPerformance,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from './workoutLogic'
 import {
@@ -101,8 +102,8 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         setToast('先完成目前的訓練，再開始下一堂')
         return
       }
-      const previous = completed.find((session) => session.routineId === routine.id)
-      const next = makeSession(routine, previous)
+      const previousSessions = await repository.getSessions()
+      const next = makeSession(routine, previousSessions)
       await repository.saveSession(next)
       activeRef.current = next
       setActiveSession(next)
@@ -451,7 +452,7 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
       <div className="workout-exercises">
         {session.exercises.map((exercise, exerciseIndex) => {
           const done = exercise.sets.filter((set) => set.done).length
-          const previous = findPreviousPerformance(exercise, previousSessions, session.id)
+          const previous = findPreviousPerformance(exercise, previousSessions, session.id, session.routineId)
           return <section className="workout-exercise-card" key={exercise.id}>
             <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}</p>{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
             {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下</span>)}</div></div>}
@@ -469,7 +470,7 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
                 return String(reps)
               }} />
               <button className={`set-check ${set.done ? 'checked' : ''}`} onClick={() => onToggleSet(exercise, set)} aria-label={set.done ? '取消完成' : '完成這組'}><Check size={20} strokeWidth={3} /></button>
-              <button className="remove-set" onClick={() => onRemoveSet(exercise.id, set.id)} aria-label="刪除這組"><Minus size={15} /></button>
+              <button className="remove-set" onClick={() => onRemoveSet(exercise.id, set.id)} aria-label="刪除這組"><Trash2 size={14} /></button>
             </div>)}</div>
             <button className="add-set-button" onClick={() => onAddSet(exercise.id)}><Plus size={16} /> 加一組</button>
           </section>
@@ -592,14 +593,17 @@ function HistoryScreen({ sessions, onOpen }: {
 
 function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: AppSettings['unit'] }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [selectedPrWeightKg, setSelectedPrWeightKg] = useState<number | null>(null)
   const records = useMemo(() => {
-    const map = new Map<string, { key: string, name: string, equipment: string, points: { date: string, max: number }[] }>()
+    const map = new Map<string, { key: string, name: string, equipment: string, sourceExerciseId: string, routineId: string | null, points: { date: string, max: number }[] }>()
     for (const session of [...sessions].reverse()) {
       for (const exercise of session.exercises) {
         const done = exercise.sets.filter((set) => set.done && set.kind === 'working' && set.weight !== null)
         if (done.length === 0) continue
         const key = exerciseKey(exercise.name, exercise.equipment)
-        const current = map.get(key) ?? { key, name: exercise.name, equipment: exercise.equipment, points: [] }
+        const current = map.get(key) ?? { key, name: exercise.name, equipment: exercise.equipment, sourceExerciseId: exercise.sourceExerciseId, routineId: session.routineId, points: [] }
+        current.sourceExerciseId = exercise.sourceExerciseId
+        current.routineId = session.routineId
         current.points.push({
           date: session.startedAt,
           max: Math.max(...done.map((set) => set.weight ?? 0)),
@@ -610,24 +614,40 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
     return [...map.values()].sort((a, b) => b.points.length - a.points.length || a.name.localeCompare(b.name, 'zh-TW'))
   }, [sessions])
   const chosen = records.find((record) => record.key === selectedKey) ?? records[0]
-  const current = chosen?.points.at(-1)
-  const best = chosen ? Math.max(...chosen.points.map((point) => point.max)) : 0
+  const exerciseHistory = useMemo(() => chosen ? findExerciseHistory(chosen, sessions, chosen.routineId) : [], [chosen, sessions])
+  const historyPoints = useMemo(() => [...exerciseHistory].reverse().flatMap((entry) => {
+    const weights = entry.sets.filter((set) => set.kind === 'working' && set.weight !== null).map((set) => set.weight!)
+    return weights.length ? [{ date: entry.date, max: Math.max(...weights) }] : []
+  }), [exerciseHistory])
+  const current = historyPoints.at(-1)
+  const best = historyPoints.length ? Math.max(...historyPoints.map((point) => point.max)) : 0
   const converter = unit === 'lb' ? 2.2046226218 : 1
+  const prs = useMemo(() => calculateExercisePr(exerciseHistory), [exerciseHistory])
+  const repsPr = prs.repsPrByWeight.find((entry) => entry.weightKg === selectedPrWeightKg) ?? prs.repsPrByWeight[0]
   return <main className="page page-with-nav"><div className="content-wrap">
     <BrandHeader eyebrow="數據趨勢" />
     <div className="page-title"><span className="eyebrow">GET STRONGER</span><h1>進步軌跡<span className="title-dot">.</span></h1><p>讓重量替你說話。</p></div>
     {records.length === 0 ? <EmptyState icon={<LineChart size={34} />} title="進步正在累積" description="完成訓練並勾選組別後，這裡會顯示每個動作的重量變化。" /> : <>
       <div className="section-heading compact"><div><span className="eyebrow">EXERCISE</span><h2>選擇動作</h2></div></div>
-      <div className="exercise-picker">{records.map((record) => <button key={record.key} className={chosen?.key === record.key ? 'selected' : ''} onClick={() => setSelectedKey(record.key)}>{record.name}</button>)}</div>
+      <div className="exercise-picker">{records.map((record) => <button key={record.key} className={chosen?.key === record.key ? 'selected' : ''} onClick={() => { setSelectedKey(record.key); setSelectedPrWeightKg(null) }}>{record.name}</button>)}</div>
       {chosen && <>
-        <div className="progress-main-card"><div className="progress-main-header"><span><span className="eyebrow">MAX WEIGHT</span><h2>{chosen.name}</h2><small>{chosen.equipment || '自訂動作'} · {chosen.points.length} 次訓練</small></span><span className="progress-icon"><Dumbbell size={24} /></span></div>
+        <div className="progress-main-card"><div className="progress-main-header"><span><span className="eyebrow">MAX WEIGHT</span><h2>{chosen.name}</h2><small>{chosen.equipment || '自訂動作'} · {historyPoints.length} 次訓練</small></span><span className="progress-icon"><Dumbbell size={24} /></span></div>
           <div className="progress-big-number">{Math.round(best * converter * 10) / 10}<span>{unit}</span></div><span className="progress-big-label">最高完成重量</span>
-          <ProgressChart values={chosen.points.map((point) => point.max * converter)} />
-          <div className="chart-labels"><span>{formatDate(chosen.points[0].date, { month: 'numeric', day: 'numeric' })}</span><span>{formatDate(chosen.points.at(-1)!.date, { month: 'numeric', day: 'numeric' })}</span></div>
+          <ProgressChart values={historyPoints.map((point) => point.max * converter)} />
+          <div className="chart-labels"><span>{historyPoints[0] && formatDate(historyPoints[0].date, { month: 'numeric', day: 'numeric' })}</span><span>{current && formatDate(current.date, { month: 'numeric', day: 'numeric' })}</span></div>
         </div>
         <div className="progress-stat-grid"><div className="progress-stat"><span>最近一次最高重量</span><strong>{Math.round((current?.max ?? 0) * converter * 10) / 10}<small> {unit}</small></strong></div></div>
-        <div className="section-heading compact"><div><span className="eyebrow">HISTORY</span><h2>歷次表現</h2></div></div>
-        <div className="progress-history">{[...chosen.points].reverse().map((point, index) => <div key={`${point.date}-${index}`}><span>{formatDate(point.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span><strong>{Math.round(point.max * converter * 10) / 10} {unit}</strong></div>)}</div>
+        <div className="section-heading compact"><div><span className="eyebrow">PERSONAL RECORDS</span><h2>個人最佳</h2></div></div>
+        <div className="pr-grid">
+          <div className="pr-card"><span>重量 PR</span><strong>{prs.weightPr ? `${displayWeight(prs.weightPr.weight, unit)} ${unit} × ${prs.weightPr.reps}` : '—'}</strong></div>
+          <div className="pr-card"><span>同重量次數 PR</span>{repsPr && <select aria-label="選擇 PR 重量" value={repsPr.weightKg} onChange={(event) => setSelectedPrWeightKg(Number(event.target.value))}>{prs.repsPrByWeight.map((entry) => <option key={entry.weightKg} value={entry.weightKg}>{displayWeight(entry.weightKg, unit)} {unit}</option>)}</select>}<strong>{repsPr ? `${displayWeight(repsPr.weightKg, unit)} ${unit} × ${repsPr.reps}` : '—'}</strong></div>
+          <div className="pr-card"><span>估算 1RM PR</span><strong>{prs.estimatedOneRepMaxPr ? `${displayWeight(prs.estimatedOneRepMaxPr.estimateKg, unit)} ${unit}` : '—'}</strong><small>Epley：重量 × (1 + 次數 / 30)</small></div>
+        </div>
+        <div className="section-heading compact"><div><span className="eyebrow">FULL HISTORY</span><h2>動作歷史</h2></div><span className="count-chip">{exerciseHistory.length} 次</span></div>
+        <div className="exercise-history">{exerciseHistory.map((entry) => <section className="exercise-history-card" key={entry.sessionId}>
+          <div className="exercise-history-head"><strong>{formatDate(entry.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</strong><span>{entry.routineName}</span></div>
+          <div className="exercise-history-sets">{entry.sets.map((set, index) => <div className={set.kind === 'warmup' ? 'warmup' : ''} key={set.id}><small>{set.kind === 'warmup' ? '暖身' : `正式 ${index + 1}`}</small><strong>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'}</strong></div>)}</div>
+        </section>)}</div>
       </>}
     </>}
   </div></main>
@@ -807,6 +827,14 @@ function NumberInput({ value, onChange, placeholder, ariaLabel, integer = false,
       if (!(integer ? /^\d*$/.test(next) : /^\d*(?:\.\d*)?$/.test(next))) return
       setRaw(next)
       onChange(next === '' || next === '.' ? null : Number(next))
+    }}
+    onFocus={() => {
+      if (onStep && window.matchMedia('(max-width: 560px)').matches) {
+        window.setTimeout(() => {
+          const input = inputRef.current
+          if (input && document.activeElement === input) input.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        }, 300)
+      }
     }}
     onBlur={() => setRaw(value)} />
   if (!onStep) return input

@@ -1,7 +1,8 @@
 import type { Routine, WorkoutSession } from '../types'
 import { createId } from '../id'
+import { findPreviousPerformance } from '../workoutLogic'
 
-export function makeSession(routine: Routine, previous?: WorkoutSession): WorkoutSession {
+export function makeSession(routine: Routine, sessions: WorkoutSession[] = []): WorkoutSession {
   return {
     id: createId(),
     routineId: routine.id,
@@ -11,11 +12,9 @@ export function makeSession(routine: Routine, previous?: WorkoutSession): Workou
     status: 'active',
     restEndsAt: null,
     exercises: routine.exercises.map((exercise) => {
-      const previousExercise = previous?.exercises.find(
-        (item) => item.sourceExerciseId === exercise.id ||
-          (item.name === exercise.name && item.equipment === exercise.equipment),
-      )
-      const previousSets = previousExercise?.sets.filter((set) => set.kind === 'working' && set.done) ?? []
+      const previousSets = findPreviousPerformance({
+        sourceExerciseId: exercise.id, name: exercise.name, equipment: exercise.equipment,
+      }, sessions, undefined, routine.id)?.sets ?? []
       return {
         id: createId(),
         sourceExerciseId: exercise.id,
@@ -23,13 +22,16 @@ export function makeSession(routine: Routine, previous?: WorkoutSession): Workou
         equipment: exercise.equipment,
         note: exercise.note,
         restSeconds: exercise.restSeconds,
-        sets: Array.from({ length: exercise.sets }, (_, index) => ({
-          id: createId(),
-          weight: previousSets[index]?.weight ?? previousSets.at(-1)?.weight ?? exercise.weight,
-          reps: previousSets[index]?.reps ?? previousSets.at(-1)?.reps ?? exercise.reps,
-          done: false,
-          kind: 'working' as const,
-        })),
+        sets: Array.from({ length: exercise.sets }, (_, index) => {
+          const previous = previousSets[index] ?? previousSets.at(-1)
+          return {
+            id: createId(),
+            weight: previous ? previous.weight : exercise.weight,
+            reps: previous ? previous.reps : exercise.reps,
+            done: false,
+            kind: 'working' as const,
+          }
+        }),
       }
     }),
   }

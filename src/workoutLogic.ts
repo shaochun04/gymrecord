@@ -1,24 +1,55 @@
 import type { SessionExercise, SetLog, Unit, WorkoutSession } from './types'
 import { displayWeight, weightToKg } from './utils'
 
-export function findPreviousPerformance(exercise: SessionExercise, sessions: WorkoutSession[], currentSessionId?: string) {
-  const completed = sessions
+export type ExerciseReference = Pick<SessionExercise, 'sourceExerciseId' | 'name' | 'equipment'>
+
+function matchingExercise(reference: ExerciseReference, session: WorkoutSession, currentRoutineId: string | null) {
+  const byId = reference.sourceExerciseId && session.exercises.find((item) => item.sourceExerciseId === reference.sourceExerciseId)
+  if (byId) return byId
+  // Source IDs belong to routine exercises. Across routines, the same movement has a different ID.
+  const allowNameMatch = !reference.sourceExerciseId || session.routineId !== currentRoutineId
+  return session.exercises.find((item) =>
+    (allowNameMatch || !item.sourceExerciseId) &&
+    item.name === reference.name && item.equipment === reference.equipment,
+  )
+}
+
+export function findExerciseHistory(reference: ExerciseReference, sessions: WorkoutSession[], currentRoutineId: string | null, currentSessionId?: string) {
+  return sessions
     .filter((session) => session.status === 'completed' && session.id !== currentSessionId)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-  const sourceId = exercise.sourceExerciseId
-  for (const session of completed) {
-    const hasWorkingLog = (item: SessionExercise) => item.sets.some((set) => set.done && set.kind === 'working')
-    const byId = sourceId && session.exercises.find((item) => item.sourceExerciseId === sourceId && hasWorkingLog(item))
-    const candidate = byId || session.exercises.find((item) =>
-      (!sourceId || !item.sourceExerciseId) &&
-      item.name === exercise.name && item.equipment === exercise.equipment && hasWorkingLog(item),
-    )
-    if (candidate) return {
-      date: session.startedAt,
-      sets: candidate.sets.filter((set) => set.done && set.kind === 'working').map((set) => ({ ...set })),
-    }
+    .flatMap((session) => {
+      const match = matchingExercise(reference, session, currentRoutineId)
+      const sets = match?.sets.filter((set) => set.done).map((set) => ({ ...set })) ?? []
+      return sets.length ? [{ sessionId: session.id, date: session.startedAt, routineName: session.routineName, sets }] : []
+    })
+}
+
+export function findPreviousPerformance(reference: ExerciseReference, sessions: WorkoutSession[], currentSessionId?: string, currentRoutineId: string | null = null) {
+  const previous = findExerciseHistory(reference, sessions, currentRoutineId, currentSessionId)
+    .find((entry) => entry.sets.some((set) => set.kind === 'working'))
+  return previous ? { date: previous.date, sets: previous.sets.filter((set) => set.kind === 'working') } : null
+}
+
+export function calculateExercisePr(history: ReturnType<typeof findExerciseHistory>) {
+  const eligible = history.flatMap((entry) => entry.sets.filter((set) =>
+    set.kind === 'working' && set.weight !== null && set.weight > 0 && set.reps !== null && set.reps > 0,
+  ))
+  const weightPr = eligible.reduce<SetLog | null>((best, set) =>
+    !best || set.weight! > best.weight! || (set.weight === best.weight && set.reps! > best.reps!) ? set : best, null)
+  const estimatedOneRepMaxPr = eligible.reduce<{ set: SetLog, estimateKg: number } | null>((best, set) => {
+    const estimateKg = set.weight! * (1 + set.reps! / 30)
+    return !best || estimateKg > best.estimateKg ? { set, estimateKg } : best
+  }, null)
+  const byWeight = new Map<number, SetLog>()
+  for (const set of eligible) {
+    const best = byWeight.get(set.weight!)
+    if (!best || set.reps! > best.reps!) byWeight.set(set.weight!, set)
   }
-  return null
+  const repsPrByWeight = [...byWeight.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([weightKg, set]) => ({ weightKg, reps: set.reps! }))
+  return { weightPr, estimatedOneRepMaxPr, repsPrByWeight }
 }
 
 export function nextRestEndAfterToggle(set: SetLog, enabled: boolean, restSeconds: number, now: number, currentEnd: number | null) {

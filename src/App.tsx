@@ -258,7 +258,7 @@ export default function App() {
         onEdit={() => setEditingRoutine(selectedRoutine)} onDelete={() => void deleteRoutine(selectedRoutine)}
       />}
       {screen === 'workout' && activeSession && <WorkoutScreen
-        session={activeSession} unit={settings.unit} restRemaining={restRemaining} now={now}
+        session={activeSession} previousSessions={completed} unit={settings.unit} restRemaining={restRemaining} now={now}
         onBack={() => setScreen('home')} onFinish={() => void finishSession()}
         onDiscard={() => void discardSession()}
         onUpdateSet={updateSet} onToggleSet={toggleSet} onAddSet={addSet} onRemoveSet={removeSet}
@@ -390,8 +390,20 @@ function RoutineScreen({ routine, unit, sessions, onBack, onStart, onEdit, onDel
   </main>
 }
 
-function WorkoutScreen({ session, unit, restRemaining, now, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onDismissTimer }: {
+function previousPerformance(exercise: SessionExercise, sessions: WorkoutSession[]) {
+  for (const session of sessions) {
+    const match = session.exercises.find((item) =>
+      (item.sourceExerciseId === exercise.sourceExerciseId || exerciseKey(item.name, item.equipment) === exerciseKey(exercise.name, exercise.equipment)) &&
+      item.sets.some((set) => set.done && set.kind === 'working'),
+    )
+    if (match) return { date: session.startedAt, sets: match.sets.filter((set) => set.done && set.kind === 'working') }
+  }
+  return null
+}
+
+function WorkoutScreen({ session, previousSessions, unit, restRemaining, now, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onDismissTimer }: {
   session: WorkoutSession
+  previousSessions: WorkoutSession[]
   unit: AppSettings['unit']
   restRemaining: number
   now: number
@@ -423,8 +435,10 @@ function WorkoutScreen({ session, unit, restRemaining, now, onBack, onFinish, on
       <div className="workout-exercises">
         {session.exercises.map((exercise, exerciseIndex) => {
           const done = exercise.sets.filter((set) => set.done).length
+          const previous = previousPerformance(exercise, previousSessions)
           return <section className="workout-exercise-card" key={exercise.id}>
             <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}{exercise.note && ` · ${exercise.note}`}</p></div><span className="set-count">{done}/{exercise.sets.length}</span></div>
+            {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下</span>)}</div></div>}
             <div className="set-table-header"><span>組別</span><span>重量 <small>{unit}</small></span><span>次數</span><span>完成</span><span /></div>
             <div className="set-table-body">{exercise.sets.map((set, index) => <div className={`set-row ${set.done ? 'is-done' : ''}`} key={set.id}>
               <button className={`set-kind ${set.kind === 'warmup' ? 'is-warmup' : ''}`} title="點擊切換暖身／正式組" onClick={() => onUpdateSet(exercise.id, set.id, { kind: set.kind === 'warmup' ? 'working' : 'warmup' })}><b>{index + 1}</b><small>{set.kind === 'warmup' ? '暖身' : '正式'}</small></button>

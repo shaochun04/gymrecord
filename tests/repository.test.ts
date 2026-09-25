@@ -5,6 +5,8 @@ import { IndexedDbWorkoutChanges, IndexedDbWorkoutRepository } from '../src/data
 import { importBackup } from '../src/data/backup'
 import { stringifyBackup } from '../src/data/backupSchema'
 import { ActiveSessionExistsError, MultipleActiveSessionsError, type WorkoutData } from '../src/data/workoutRepository'
+import { validateCompletedSessionEdit } from '../src/phase4Logic'
+import { calculateExercisePr, completedWorkingVolumeKg, findExerciseHistory } from '../src/workoutLogic'
 
 const settings: WorkoutData['settings'] = { id: 'main', unit: 'kg', restTimerEnabled: true }
 const definition: WorkoutData['exerciseDefinitions'][number] = { id: 'db-bench', name: '臥推', equipment: '啞鈴', variation: '平板', primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false }
@@ -87,6 +89,8 @@ describe('IndexedDB v3 repository', () => {
     it('atomically merges references, archives source, and preserves session display snapshots', async () => {
       await repository.saveSession(session('completed'))
       await repository.saveSession(session('active', 'active'))
+      await repository.saveSession({ ...session('already-target'), exercises: [{ ...session('already-target').exercises[0], exerciseDefinitionId: target.id,
+        sets: [{ ...session('already-target').exercises[0].sets[0], weight: 30 }] }] })
       const counts = await repository.mergeExerciseDefinitions(definition.id, target.id)
       expect(counts).toEqual({ routines: 1, sessions: 2 })
       expect((await repository.getRoutines())[0].exercises[0].exerciseDefinitionId).toBe(target.id)
@@ -94,6 +98,9 @@ describe('IndexedDB v3 repository', () => {
       expect(sessions.every((item) => item.exercises[0].exerciseDefinitionId === target.id)).toBe(true)
       expect(sessions[0].exercises[0]).toMatchObject({ name: '舊名稱', equipment: '舊器材', variation: '舊變化' })
       expect((await repository.getExerciseDefinitions()).find((item) => item.id === definition.id)?.archived).toBe(true)
+      const grouped = findExerciseHistory(target.id, sessions)
+      expect(grouped.map((entry) => entry.sessionId).sort()).toEqual(['already-target', 'completed'])
+      expect(calculateExercisePr(grouped).weightPr?.weight).toBe(30)
     })
 
     it('leaves data unchanged if a merge target is missing', async () => {
@@ -124,6 +131,30 @@ describe('IndexedDB v3 repository', () => {
       await repository.replaceAll({ exerciseDefinitions: [], routines: [], sessions: [], settings })
       await importBackup(new File([stringifyBackup(before)], 'backup.json'), repository)
       expect(await repository.readAll()).toEqual(before)
+    })
+
+    it('edits a completed session, recalculates records, and preserves the correction through v3 backup', async () => {
+      await repository.saveSession(session('completed'))
+      const original = (await repository.getSession('completed'))!
+      const edited = structuredClone(original)
+      edited.exercises[0].sets[0].weight = 22
+      edited.exercises[0].sets[0].reps = 12
+      edited.exercises[0].sets[0].rir = 1
+      validateCompletedSessionEdit(original, edited)
+      await repository.saveSession(edited)
+      expect(completedWorkingVolumeKg((await repository.getSession('completed'))!)).toBe(264)
+      expect(calculateExercisePr(findExerciseHistory(definition.id, await repository.getSessions())).weightPr?.weight).toBe(22)
+      const backup = stringifyBackup(await repository.readAll())
+      expect(JSON.parse(backup).version).toBe(3)
+      await repository.replaceAll({ exerciseDefinitions: [], routines: [], sessions: [], settings })
+      await importBackup(new File([backup], 'correction.json'), repository)
+      expect(await repository.getSession('completed')).toEqual(edited)
+    })
+
+    it('cannot reactivate an already completed session', async () => {
+      await repository.saveSession(session('completed'))
+      await expect(repository.saveSession({ ...session('completed'), status: 'active', endedAt: null })).rejects.toThrow('已完成的訓練不可改回進行中')
+      expect((await repository.getSession('completed'))?.status).toBe('completed')
     })
 
     it('queries sessions by date range and ID', async () => {

@@ -48,6 +48,7 @@ describe('weekly primary muscle sets', () => {
     expect(stats.muscles.find((item) => item.muscle === 'glutes')).toMatchObject({ sets: 2, days: 1 })
     expect(stats.muscles.find((item) => item.muscle === 'lowerBack')).toMatchObject({ sets: 0, days: 0 })
     expect(stats.unclassifiedSets).toBe(2)
+    expect(stats.unclassifiedExercises).toEqual([{ exerciseDefinitionId: 'unknown', sets: 2 }])
     const corrected = definitions.map((item) => item.id === 'unknown' ? { ...item, primaryMuscles: ['upperBack' as const] } : item)
     expect(weeklyMuscleStats(sessions, corrected, monday).muscles.find((item) => item.muscle === 'upperBack')?.sets).toBe(2)
   })

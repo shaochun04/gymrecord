@@ -19,6 +19,7 @@ export function weeklyMuscleStats(sessions: WorkoutSession[], definitions: Exerc
   const byId = new Map(definitions.map((definition) => [definition.id, definition]))
   const counts = new Map<MuscleGroup, { sets: number, days: Set<string> }>(MUSCLE_GROUPS.map((muscle) => [muscle, { sets: 0, days: new Set() }]))
   let unclassifiedSets = 0
+  const unclassifiedById = new Map<string, number>()
   for (const session of sessions) {
     const time = new Date(session.startedAt).getTime()
     if (session.status !== 'completed' || time < start.getTime() || time >= end.getTime()) continue
@@ -27,7 +28,10 @@ export function weeklyMuscleStats(sessions: WorkoutSession[], definitions: Exerc
       const count = exercise.sets.filter((set) => set.done && set.kind === 'working').length
       if (count === 0) continue
       const primary = byId.get(exercise.exerciseDefinitionId)?.primaryMuscles ?? []
-      if (primary.length === 0) unclassifiedSets += count
+      if (primary.length === 0) {
+        unclassifiedSets += count
+        unclassifiedById.set(exercise.exerciseDefinitionId, (unclassifiedById.get(exercise.exerciseDefinitionId) ?? 0) + count)
+      }
       for (const muscle of primary) {
         const entry = counts.get(muscle)!
         entry.sets += count
@@ -38,6 +42,7 @@ export function weeklyMuscleStats(sessions: WorkoutSession[], definitions: Exerc
   return {
     weekStart: start,
     unclassifiedSets,
+    unclassifiedExercises: [...unclassifiedById].map(([exerciseDefinitionId, sets]) => ({ exerciseDefinitionId, sets })).sort((a, b) => b.sets - a.sets),
     muscles: MUSCLE_GROUPS.map((muscle) => ({ muscle, sets: counts.get(muscle)!.sets, days: counts.get(muscle)!.days.size })),
   }
 }

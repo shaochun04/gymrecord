@@ -109,6 +109,10 @@ export class IndexedDbWorkoutRepository implements WorkoutRepository {
   async deleteRoutine(id: string) { await db.routines.delete(id) }
   async saveSession(session: WorkoutSession) {
     await db.transaction('rw', db.sessions, async () => {
+      const existing = await db.sessions.get(session.id)
+      if (existing?.status === 'completed' && session.status !== 'completed') {
+        throw new Error('已完成的訓練不可改回進行中')
+      }
       const active = await db.sessions.where('status').equals('active').limit(2).toArray()
       if (active.length > 1) throw new MultipleActiveSessionsError()
       if (session.status === 'active' && active.length === 1 && active[0].id !== session.id) {

@@ -14,6 +14,7 @@ import { createId } from './id'
 import { definitionSubtitle, MUSCLE_LABELS, newDefinition } from './exerciseDefinitions'
 import { ExerciseDefinitionEditor, ExerciseLibrary, ExercisePicker } from './ExerciseLibrary'
 import { shiftLocalWeek, startOfLocalWeek, weeklyMuscleStats } from './muscleStats'
+import { cloneRoutine, exerciseVolumeSeries, moveSessionExercise, newSessionPrs, unfinishedSessionCounts, validateCompletedSessionEdit } from './phase4Logic'
 import { formatTargetRange, normalizeTargetRange } from './targetReps'
 import {
   adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
@@ -132,7 +133,11 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   async function finishSession() {
     const current = activeRef.current
     if (!current) return
-    if (completedSetCount(current) === 0 && !window.confirm('還沒有完成任何組。仍要結束訓練嗎？')) return
+    const unfinished = unfinishedSessionCounts(current)
+    const warnings = [unfinished.workingSets > 0 ? `尚有 ${unfinished.workingSets} 組正式組未完成` : '',
+      unfinished.exercises > 0 ? `${unfinished.exercises} 個動作尚未完成` : ''].filter(Boolean)
+    if (completedSetCount(current) === 0) warnings.unshift('還沒有完成任何組')
+    if (warnings.length && !window.confirm(`${warnings.join('、')}，仍要結束訓練嗎？`)) return
     const finished: WorkoutSession = { ...current, status: 'completed', endedAt: new Date().toISOString(), restEndsAt: null }
     try {
       await writeQueue.current
@@ -211,6 +216,10 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
     }))
   }
 
+  function reorderSessionExercise(exerciseId: string, direction: -1 | 1) {
+    updateSession((current) => moveSessionExercise(current, exerciseId, direction))
+  }
+
   function addWorkoutExercise(definition: ExerciseDefinition, exercise: RoutineExercise) {
     updateSession((current) => ({
       ...current,
@@ -247,6 +256,22 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
     setEditingRoutine(null)
     setScreen('routine')
     setToast('菜單已儲存')
+  }
+
+  async function duplicateRoutine(routine: Routine) {
+    const next = cloneRoutine(routine, Math.max(-1, ...routines.map((item) => item.order)) + 1)
+    try {
+      await repository.saveRoutine(next)
+      setSelectedRoutineId(next.id)
+      setScreen('routine')
+      setToast('菜單已複製')
+    } catch { setToast('無法複製菜單，請再試一次') }
+  }
+
+  async function saveHistoryEdit(original: WorkoutSession, edited: WorkoutSession) {
+    validateCompletedSessionEdit(original, edited)
+    await repository.saveSession(edited)
+    setToast('訓練紀錄已更新')
   }
 
   async function saveDefinition(definition: ExerciseDefinition) {
@@ -319,21 +344,22 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       {screen === 'routine' && selectedRoutine && <RoutineScreen
         routine={selectedRoutine} definitions={definitions} unit={settings.unit} sessions={completed}
         onBack={() => setScreen('home')} onStart={() => void startRoutine(selectedRoutine)}
-        onEdit={() => setEditingRoutine(selectedRoutine)} onDelete={() => void deleteRoutine(selectedRoutine)}
+        onEdit={() => setEditingRoutine(selectedRoutine)} onClone={() => void duplicateRoutine(selectedRoutine)} onDelete={() => void deleteRoutine(selectedRoutine)}
       />}
       {screen === 'workout' && activeSession && <WorkoutScreen
         session={activeSession} previousSessions={completed} unit={settings.unit}
         onBack={() => setScreen('home')} onFinish={() => void finishSession()}
         onDiscard={() => void discardSession()}
         onUpdateSet={updateSet} onToggleSet={toggleSet} onAddSet={addSet} onRemoveSet={removeSet}
+        onMoveExercise={reorderSessionExercise}
         onAddExercise={() => setShowAddExercise(true)}
         onDismissTimer={() => updateSession((current) => ({ ...current, restEndsAt: null }))}
         onShiftTimer={(seconds) => updateSession((current) => ({ ...current, restEndsAt: shiftRestEnd(current.restEndsAt, seconds, Date.now()) }))}
         onExpireTimer={() => updateSession((current) => current.restEndsAt && current.restEndsAt <= Date.now() ? { ...current, restEndsAt: null } : current)}
       />}
-      {screen === 'summary' && summarySession && <WorkoutSummary session={summarySession} onHome={() => setScreen('home')} onHistory={() => { setScreen('history'); setHistoryDetailId(summarySession.id) }} />}
+      {screen === 'summary' && summarySession && <WorkoutSummary session={summarySession} previousSessions={completed} unit={settings.unit} onHome={() => setScreen('home')} onHistory={() => { setScreen('history'); setHistoryDetailId(summarySession.id) }} />}
       {screen === 'history' && <HistoryScreen sessions={completed} onOpen={setHistoryDetailId} />}
-      {screen === 'progress' && <ProgressScreen sessions={completed} definitions={definitions} unit={settings.unit} />}
+      {screen === 'progress' && <ProgressScreen sessions={completed} definitions={definitions} unit={settings.unit} onOpenLibrary={() => setScreen('library')} />}
       {screen === 'settings' && <SettingsScreen
         settings={settings} persisted={persisted} onChange={(patch) => void changeSettings(patch)}
         onExport={() => void exportBackup(repository)} onExportCsv={() => void exportCsv(repository)}
@@ -359,7 +385,8 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         onCreateDefinition={saveDefinition}
       />}
       {historyDetail && <HistoryDetail
-        session={historyDetail} unit={settings.unit} onClose={() => setHistoryDetailId(null)}
+        key={historyDetail.id} session={historyDetail} unit={settings.unit} onClose={() => setHistoryDetailId(null)}
+        onSave={async (edited) => { await saveHistoryEdit(historyDetail, edited); setHistoryDetailId(null) }}
         onDelete={() => void deleteHistory(historyDetail)}
       />}
       <input ref={importInput} className="visually-hidden" type="file" accept="application/json,.json"
@@ -430,7 +457,7 @@ function HomeScreen({ routines, sessions, activeSession, currentWeekCount, onOpe
   </main>
 }
 
-function RoutineScreen({ routine, definitions, unit, sessions, onBack, onStart, onEdit, onDelete }: {
+function RoutineScreen({ routine, definitions, unit, sessions, onBack, onStart, onEdit, onClone, onDelete }: {
   routine: Routine
   definitions: ExerciseDefinition[]
   unit: AppSettings['unit']
@@ -438,6 +465,7 @@ function RoutineScreen({ routine, definitions, unit, sessions, onBack, onStart, 
   onBack: () => void
   onStart: () => void
   onEdit: () => void
+  onClone: () => void
   onDelete: () => void
 }) {
   const last = sessions.find((session) => session.routineId === routine.id)
@@ -457,13 +485,13 @@ function RoutineScreen({ routine, definitions, unit, sessions, onBack, onStart, 
         </div> })}
         {routine.exercises.length === 0 && <div className="empty-inline">這份菜單還沒有動作。點右上角編輯開始加入。</div>}
       </div>
-      <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這份菜單</button>
+      <div className="routine-secondary-actions"><button className="routine-clone" onClick={onClone}><Plus size={16} /> 複製菜單</button><button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這份菜單</button></div>
     </div>
     <div className="sticky-action"><div className="sticky-action-inner"><button className="primary-button" onClick={onStart} disabled={routine.exercises.length === 0}><Play size={18} fill="currentColor" /> 開始訓練 <ArrowRight size={19} /></button></div></div>
   </main>
 }
 
-function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onDismissTimer, onShiftTimer, onExpireTimer }: {
+function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDiscard, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onMoveExercise, onAddExercise, onDismissTimer, onShiftTimer, onExpireTimer }: {
   session: WorkoutSession
   previousSessions: WorkoutSession[]
   unit: AppSettings['unit']
@@ -474,6 +502,7 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
   onToggleSet: (exercise: SessionExercise, set: SetLog) => void
   onAddSet: (exerciseId: string) => void
   onRemoveSet: (exerciseId: string, setId: string) => void
+  onMoveExercise: (exerciseId: string, direction: -1 | 1) => void
   onAddExercise: () => void
   onDismissTimer: () => void
   onShiftTimer: (seconds: number) => void
@@ -501,6 +530,7 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
           const suggestion = previous ? getProgressionSuggestion(exercise.targetRepsMin, exercise.targetRepsMax, previous.sets) : null
           return <section className="workout-exercise-card" key={exercise.id}>
             <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{definitionSubtitle(exercise)}</p>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) && <small className="workout-target">目標 {formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax)}</small>}{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
+            <div className="session-order-controls"><span>當次順序</span><button disabled={exerciseIndex === 0} onClick={() => onMoveExercise(exercise.id, -1)} aria-label={`上移 ${exercise.name}`}>↑ 上移</button><button disabled={exerciseIndex === session.exercises.length - 1} onClick={() => onMoveExercise(exercise.id, 1)} aria-label={`下移 ${exercise.name}`}>↓ 下移</button></div>
             {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下{set.rir !== null && <em> · {formatRir(set.rir)}</em>}</span>)}</div>{suggestion && suggestion.kind !== 'none' && <p className="progression-suggestion"><strong>下次建議</strong>{suggestion.text}</p>}</div>}
             <div className="set-table-header"><span>組別</span><span>重量 <small>{unit}</small></span><span>次數</span><span>完成</span><span /></div>
             <div className="set-table-body">{exercise.sets.map((set, index) => <div className="set-entry" key={set.id}><div className={`set-row ${set.done ? 'is-done' : ''}`}>
@@ -577,12 +607,14 @@ function RestTimer({ restEndsAt, onShift, onSkip, onExpire }: {
   </div>
 }
 
-function WorkoutSummary({ session, onHome, onHistory }: { session: WorkoutSession, onHome: () => void, onHistory: () => void }) {
+function WorkoutSummary({ session, previousSessions, unit, onHome, onHistory }: { session: WorkoutSession, previousSessions: WorkoutSession[], unit: AppSettings['unit'], onHome: () => void, onHistory: () => void }) {
   const volume = completedWorkingVolumeKg(session)
+  const newPrs = newSessionPrs(session, previousSessions)
   return <main className="page summary-page"><div className="content-wrap">
     <BrandHeader eyebrow="訓練已完成" />
     <div className="summary-hero"><span className="summary-icon"><CheckCircle2 size={35} /></span><span className="eyebrow">WORKOUT COMPLETE</span><h1>{session.routineName}</h1><p>{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric' })}</p></div>
     <div className="summary-stats"><div><Clock3 size={20} /><span>訓練時間</span><strong>{formatDuration(durationMinutes(session.startedAt, session.endedAt ?? session.startedAt))}</strong></div><div><CheckCircle2 size={20} /><span>完成組數</span><strong>{completedSetCount(session)} / {plannedSetCount(session)}</strong></div><div><Dumbbell size={20} /><span>訓練量</span><strong>{new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 1 }).format(volume)} <small>kg</small></strong></div></div>
+    {newPrs.length > 0 && <section className="summary-prs"><h2>本次新紀錄</h2>{newPrs.map((pr) => <div key={`${pr.exerciseDefinitionId}-${pr.kind}-${pr.set.weight}`}><span><strong>{pr.name}</strong><small>{definitionSubtitle(pr)}</small></span><b>{displayWeight(pr.set.weight, unit)} {unit} × {pr.set.reps}</b><em>{pr.kind === 'weight' ? '重量 PR' : '同重量次數 PR'}</em></div>)}</section>}
     <button className="primary-button summary-primary" onClick={onHome}>完成，回首頁 <ArrowRight size={19} /></button>
     <button className="summary-secondary" onClick={onHistory}>查看這次訓練紀錄</button>
   </div></main>
@@ -637,7 +669,7 @@ function HistoryScreen({ sessions, onOpen }: {
   </div></main>
 }
 
-function ProgressScreen({ sessions, definitions, unit }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[], unit: AppSettings['unit'] }) {
+function ProgressScreen({ sessions, definitions, unit, onOpenLibrary }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[], unit: AppSettings['unit'], onOpenLibrary: () => void }) {
   const [tab, setTab] = useState<'exercises' | 'muscles'>('exercises')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [selectedPrWeightKg, setSelectedPrWeightKg] = useState<number | null>(null)
@@ -672,12 +704,13 @@ function ProgressScreen({ sessions, definitions, unit }: { sessions: WorkoutSess
   const best = historyPoints.length ? Math.max(...historyPoints.map((point) => point.max)) : 0
   const converter = unit === 'lb' ? 2.2046226218 : 1
   const prs = useMemo(() => calculateExercisePr(exerciseHistory), [exerciseHistory])
+  const volumePoints = useMemo(() => chosen ? exerciseVolumeSeries(chosen.key, sessions) : [], [chosen, sessions])
   const repsPr = prs.repsPrByWeight.find((entry) => entry.weightKg === selectedPrWeightKg) ?? prs.repsPrByWeight[0]
   return <main className="page page-with-nav"><div className="content-wrap">
     <BrandHeader eyebrow="數據趨勢" />
     <div className="page-title"><span className="eyebrow">GET STRONGER</span><h1>進步軌跡<span className="title-dot">.</span></h1><p>讓重量替你說話。</p></div>
     <div className="progress-tabs"><button className={tab === 'exercises' ? 'selected' : ''} onClick={() => setTab('exercises')}>動作</button><button className={tab === 'muscles' ? 'selected' : ''} onClick={() => setTab('muscles')}>肌群</button></div>
-    {tab === 'muscles' ? <MuscleProgress sessions={sessions} definitions={definitions} /> : <>
+    {tab === 'muscles' ? <MuscleProgress sessions={sessions} definitions={definitions} onOpenLibrary={onOpenLibrary} /> : <>
     {records.length === 0 ? <EmptyState icon={<LineChart size={34} />} title="進步正在累積" description="完成訓練並勾選組別後，這裡會顯示每個動作的重量變化。" /> : <>
       <div className="section-heading compact"><div><span className="eyebrow">EXERCISE</span><h2>選擇動作</h2></div></div>
       <div className="exercise-picker">{records.map((record) => <button key={record.key} className={chosen?.key === record.key ? 'selected' : ''} onClick={() => { setSelectedKey(record.key); setSelectedPrWeightKg(null) }}>{record.definition.name}<small>{definitionSubtitle(record.definition)}</small></button>)}</div>
@@ -688,6 +721,7 @@ function ProgressScreen({ sessions, definitions, unit }: { sessions: WorkoutSess
           <div className="chart-labels"><span>{historyPoints[0] && formatDate(historyPoints[0].date, { month: 'numeric', day: 'numeric' })}</span><span>{current && formatDate(current.date, { month: 'numeric', day: 'numeric' })}</span></div>
         </div>
         <div className="progress-stat-grid"><div className="progress-stat"><span>最近一次最高重量</span><strong>{Math.round((current?.max ?? 0) * converter * 10) / 10}<small> {unit}</small></strong></div></div>
+        {volumePoints.length > 0 && <section className="volume-trend"><span className="eyebrow">RECORDED VOLUME</span><h2>紀錄訓練量趨勢</h2><strong>{displayWeight(volumePoints.at(-1)!.volumeKg, unit)} <small>{unit} × 次數</small></strong><ProgressChart values={volumePoints.map((point) => point.volumeKg * converter)} label="歷次紀錄訓練量趨勢" /><p>依每次已完成正式組的輸入重量 × 次數計算</p></section>}
         <div className="section-heading compact"><div><span className="eyebrow">PERSONAL RECORDS</span><h2>個人最佳</h2></div></div>
         <div className="pr-grid">
           <div className="pr-card"><span>重量 PR</span><strong>{prs.weightPr ? `${displayWeight(prs.weightPr.weight, unit)} ${unit} × ${prs.weightPr.reps}` : '—'}</strong></div>
@@ -705,7 +739,7 @@ function ProgressScreen({ sessions, definitions, unit }: { sessions: WorkoutSess
   </div></main>
 }
 
-function MuscleProgress({ sessions, definitions }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[] }) {
+function MuscleProgress({ sessions, definitions, onOpenLibrary }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[], onOpenLibrary: () => void }) {
   const [weekOffset, setWeekOffset] = useState(0)
   const week = shiftLocalWeek(startOfLocalWeek(new Date()), weekOffset)
   const stats = weeklyMuscleStats(sessions, definitions, week)
@@ -714,14 +748,14 @@ function MuscleProgress({ sessions, definitions }: { sessions: WorkoutSession[],
   const visible = stats.muscles.filter((row) => row.sets > 0)
   const maximum = Math.max(1, ...visible.map((row) => row.sets))
   return <section className="muscle-progress">
-    <div className="muscle-week-header"><div><span className="eyebrow">PRIMARY MUSCLE SETS</span><h2>{weekOffset === 0 ? '本週' : `${formatDate(week.toISOString(), { month: 'numeric', day: 'numeric' })} 起`}</h2><p>{formatDate(week.toISOString(), { year: 'numeric', month: 'numeric', day: 'numeric' })} ～ {formatDate(nextWeekStart.toISOString(), { month: 'numeric', day: 'numeric' })}（週一前）</p></div><div className="calendar-controls"><button onClick={() => setWeekOffset((offset) => offset - 1)} aria-label="上一週"><ChevronLeft size={19} /></button><button onClick={() => setWeekOffset((offset) => offset + 1)} disabled={!canGoNext} aria-label="下一週"><ChevronRight size={19} /></button></div></div>
+    <div className="muscle-week-header"><div><span className="eyebrow">PRIMARY MUSCLE SETS</span><h2>主要肌群有效組數</h2><p>{weekOffset === 0 ? '本週 · ' : ''}{formatDate(week.toISOString(), { year: 'numeric', month: 'numeric', day: 'numeric' })} ～ {formatDate(nextWeekStart.toISOString(), { month: 'numeric', day: 'numeric' })}（週一前）</p></div><div className="calendar-controls"><button onClick={() => setWeekOffset((offset) => offset - 1)} aria-label="上一週"><ChevronLeft size={19} /></button><button onClick={() => setWeekOffset((offset) => offset + 1)} disabled={!canGoNext} aria-label="下一週"><ChevronRight size={19} /></button></div></div>
     <p className="muscle-explainer">只計已完成訓練的正式完成組。若一個動作有多個主要肌群，每個肌群各計一組。</p>
     {visible.length ? <div className="muscle-rows">{visible.map((row) => <div className="muscle-row" key={row.muscle}><div><strong>{MUSCLE_LABELS[row.muscle]}</strong><span>{row.sets} 組 · {row.days} 天</span></div><div className="muscle-bar"><span style={{ width: `${row.sets / maximum * 100}%` }} /></div></div>)}</div> : <p className="library-empty">這週尚無已分類的正式組。</p>}
-    <div className="unclassified-card"><strong>未分類 {stats.unclassifiedSets} 組</strong><small>可到動作庫補上主要肌群，過去統計會一起更新。</small></div>
+    <div className="unclassified-card"><strong>未分類 {stats.unclassifiedSets} 組</strong><small>可到動作庫補上主要肌群，過去統計會一起更新。</small>{stats.unclassifiedExercises.length > 0 && <ul>{stats.unclassifiedExercises.map((item) => { const definition = definitions.find((row) => row.id === item.exerciseDefinitionId); return <li key={item.exerciseDefinitionId}><span>{definition?.name ?? '找不到動作'}{definition?.archived && '（已封存）'}</span><b>{item.sets} 組</b></li> })}</ul>}{stats.unclassifiedSets > 0 && <button onClick={onOpenLibrary}>前往動作庫分類 <ArrowRight size={14} /></button>}</div>
   </section>
 }
 
-function ProgressChart({ values }: { values: number[] }) {
+function ProgressChart({ values, label = '歷次最高重量趨勢' }: { values: number[], label?: string }) {
   const minimum = Math.min(...values)
   const maximum = Math.max(...values)
   const points = values.map((value, index) => {
@@ -731,7 +765,7 @@ function ProgressChart({ values }: { values: number[] }) {
   })
   const line = points.map((point) => `${point.x},${point.y}`).join(' ')
   const area = `15,120 ${line} 285,120`
-  return <svg className="progress-chart" viewBox="0 0 300 128" preserveAspectRatio="none" role="img" aria-label="歷次最高重量趨勢">
+  return <svg className="progress-chart" viewBox="0 0 300 128" preserveAspectRatio="none" role="img" aria-label={label}>
     <defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#d2f072" stopOpacity=".22" /><stop offset="1" stopColor="#d2f072" stopOpacity="0" /></linearGradient></defs>
     <path d="M0 108H300 M0 65H300 M0 23H300" className="chart-grid" />
     {points.length > 1 && <polygon points={area} fill="url(#chartFill)" />}
@@ -788,24 +822,52 @@ function EmptyState({ icon, title, description }: { icon: ReactNode, title: stri
   return <div className="empty-state"><span className="empty-state-icon">{icon}</span><h3>{title}</h3><p>{description}</p></div>
 }
 
-function HistoryDetail({ session, unit, onClose, onDelete }: {
+function HistoryDetail({ session, unit, onClose, onDelete, onSave }: {
   session: WorkoutSession
   unit: AppSettings['unit']
   onClose: () => void
   onDelete: () => void
+  onSave: (edited: WorkoutSession) => Promise<void>
 }) {
   const duration = formatDuration(durationMinutes(session.startedAt, session.endedAt ?? session.startedAt))
+  const [draft, setDraft] = useState<WorkoutSession>(() => structuredClone(session))
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const scrollRef = useRef<HTMLDivElement>(null)
+  function patchSet(exerciseId: string, setId: string, patch: Partial<SetLog>) {
+    setDraft((current) => ({ ...current, exercises: current.exercises.map((exercise) => exercise.id !== exerciseId ? exercise : {
+      ...exercise, sets: exercise.sets.map((set) => set.id === setId ? { ...set, ...patch } : set),
+    }) }))
+  }
+  async function save() {
+    try {
+      validateCompletedSessionEdit(session, draft)
+      setSaving(true)
+      await onSave(draft)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '無法儲存訓練紀錄') }
+    finally { setSaving(false) }
+  }
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <div className="sheet detail-sheet" role="dialog" aria-modal="true" aria-label="訓練詳情">
       <div className="sheet-header"><div><span className="eyebrow">WORKOUT DETAIL</span><h2>{session.routineName}</h2></div><button className="icon-button" onClick={onClose} aria-label="關閉"><X size={21} /></button></div>
-      <div className="sheet-scroll">
+      <div className="sheet-scroll" ref={scrollRef}>
         <p className="sheet-date">{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
-        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>訓練時間</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
-        <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{definitionSubtitle(exercise)}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
-          <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下{set.rir !== null && ` · ${formatRir(set.rir)}`}</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
+        <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>訓練時間</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(editing ? draft : session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
+        {!editing && <button className="routine-clone" onClick={() => { scrollRef.current?.scrollTo(0, 0); setEditing(true) }}><Pencil size={15} /> 編輯紀錄</button>}
+        <div className="detail-exercise-list">{(editing ? draft : session).exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{definitionSubtitle(exercise)}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
+          {editing ? <div className="history-edit-sets">{exercise.sets.map((set, setIndex) => <div className="history-edit-set" key={set.id}>
+            <strong>第 {setIndex + 1} 組</strong><label><span>重量 {unit}</span><NumberInput value={displayWeight(set.weight, unit)} onChange={(value) => patchSet(exercise.id, set.id, { weight: weightToKg(value, unit) })} placeholder="—" ariaLabel={`${exercise.name} 第 ${setIndex + 1} 組重量`} /></label>
+            <label><span>次數</span><NumberInput value={set.reps === null ? '' : String(set.reps)} onChange={(value) => patchSet(exercise.id, set.id, { reps: value })} placeholder="—" ariaLabel={`${exercise.name} 第 ${setIndex + 1} 組次數`} integer /></label>
+            <label><span>RIR</span><select aria-label={`${exercise.name} 第 ${setIndex + 1} 組 RIR`} value={set.rir ?? ''} disabled={!set.done || set.kind === 'warmup'} onChange={(event) => patchSet(exercise.id, set.id, { rir: event.target.value === '' ? null : Number(event.target.value) as SetLog['rir'] })}><option value="">—</option>{[0, 1, 2, 3, 4].map((rir) => <option key={rir} value={rir}>{rir === 4 ? '4+' : rir}</option>)}</select></label>
+            <label><span>類型</span><select aria-label={`${exercise.name} 第 ${setIndex + 1} 組類型`} value={set.kind} onChange={(event) => patchSet(exercise.id, set.id, { kind: event.target.value as SetLog['kind'], rir: event.target.value === 'warmup' ? null : set.rir })}><option value="working">正式</option><option value="warmup">暖身</option></select></label>
+            <label className="history-edit-done"><input type="checkbox" checked={set.done} onChange={(event) => patchSet(exercise.id, set.id, { done: event.target.checked, rir: event.target.checked ? set.rir : null })} /> 已完成</label>
+          </div>)}</div> : <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下{set.rir !== null && ` · ${formatRir(set.rir)}`}</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>}
         </section>)}</div>
-        <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這筆紀錄</button>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        {!editing && <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這筆紀錄</button>}
       </div>
+      {editing && <div className="sheet-footer history-edit-actions"><button onClick={() => { setEditing(false); setDraft(structuredClone(session)); setError(''); scrollRef.current?.scrollTo(0, 0) }}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}><Check size={17} /> 儲存修改</button></div>}
     </div>
   </div>
 }

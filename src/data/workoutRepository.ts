@@ -24,6 +24,7 @@ export class ActiveSessionExistsError extends Error {
 //   Existing routine and session references remain readable after archival.
 // - At most one session may have status === 'active'. saveSession() enforces this
 //   atomically, and getActiveSession() reports an existing violation.
+// - A completed session may be corrected, but saveSession() never reactivates it.
 // - replaceAll() is one atomic operation: every write commits or none do.
 // - mergeExerciseDefinitions() updates all routine and session references and
 //   archives the source in one transaction; session display snapshots remain.

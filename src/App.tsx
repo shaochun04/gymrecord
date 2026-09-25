@@ -9,8 +9,11 @@ import { exportBackup, exportCsv, importBackup } from './data/backup'
 import { makeSession } from './data/session'
 import type { WorkoutChangeSource } from './data/workoutChanges'
 import { ActiveSessionExistsError, type WorkoutRepository } from './data/workoutRepository'
-import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
+import type { AppSettings, ExerciseDefinition, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import { createId } from './id'
+import { definitionSubtitle, MUSCLE_LABELS, newDefinition } from './exerciseDefinitions'
+import { ExerciseDefinitionEditor, ExerciseLibrary, ExercisePicker } from './ExerciseLibrary'
+import { shiftLocalWeek, startOfLocalWeek, weeklyMuscleStats } from './muscleStats'
 import { formatTargetRange, normalizeTargetRange } from './targetReps'
 import {
   adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
@@ -18,17 +21,18 @@ import {
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from './workoutLogic'
 import {
-  completedSetCount, displayWeight, exerciseKey, formatDate, localDateKey, plannedSetCount,
+  completedSetCount, displayWeight, formatDate, localDateKey, plannedSetCount,
   weightToKg,
 } from './utils'
 
-type Screen = 'home' | 'routine' | 'workout' | 'summary' | 'history' | 'progress' | 'settings'
+type Screen = 'home' | 'routine' | 'workout' | 'summary' | 'history' | 'progress' | 'settings' | 'library'
 
 const blankSettings: AppSettings = { id: 'main', unit: 'kg', restTimerEnabled: true }
 
 export default function App({ repository, changes }: { repository: WorkoutRepository, changes: WorkoutChangeSource }) {
   const [screen, setScreen] = useState<Screen>('home')
   const [routines, setRoutines] = useState<Routine[]>([])
+  const [definitions, setDefinitions] = useState<ExerciseDefinition[]>([])
   const [sessions, setSessions] = useState<WorkoutSession[]>([])
   const [settings, setSettings] = useState<AppSettings>(blankSettings)
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null)
@@ -47,6 +51,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   useEffect(() => {
     let cancelled = false
     const unsubscribe = changes.subscribe((change) => {
+      if (change.kind === 'exerciseDefinitions') setDefinitions(change.value)
       if (change.kind === 'routines') setRoutines(change.value)
       if (change.kind === 'sessions') setSessions(change.value)
       if (change.kind === 'settings') setSettings(change.value)
@@ -103,8 +108,8 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         setToast('先完成目前的訓練，再開始下一堂')
         return
       }
-      const previousSessions = await repository.getSessions()
-      const next = makeSession(routine, previousSessions)
+      const [previousSessions, currentDefinitions] = await Promise.all([repository.getSessions(), repository.getExerciseDefinitions()])
+      const next = makeSession(routine, currentDefinitions, previousSessions)
       await repository.saveSession(next)
       activeRef.current = next
       setActiveSession(next)
@@ -183,8 +188,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         if (exercise.id !== exerciseId) return exercise
         const last = exercise.sets.at(-1)
         const source = routines.find((routine) => routine.id === current.routineId)?.exercises.find((item) =>
-          item.id === exercise.sourceExerciseId ||
-          (!exercise.sourceExerciseId && item.name === exercise.name && item.equipment === exercise.equipment),
+          item.id === exercise.sourceExerciseId,
         )
         return {
           ...exercise,
@@ -207,12 +211,13 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
     }))
   }
 
-  function addWorkoutExercise(exercise: RoutineExercise) {
+  function addWorkoutExercise(definition: ExerciseDefinition, exercise: RoutineExercise) {
     updateSession((current) => ({
       ...current,
       exercises: [...current.exercises, {
-        id: createId(), sourceExerciseId: exercise.id, name: exercise.name,
-        equipment: exercise.equipment, note: exercise.note, restSeconds: exercise.restSeconds,
+        id: createId(), sourceExerciseId: '', exerciseDefinitionId: definition.id,
+        name: definition.name, equipment: definition.equipment, variation: definition.variation,
+        note: exercise.note, restSeconds: exercise.restSeconds,
         targetRepsMin: exercise.targetRepsMin, targetRepsMax: exercise.targetRepsMax,
         sets: Array.from({ length: exercise.sets }, () => ({
           id: createId(), weight: exercise.weight, reps: exercise.reps,
@@ -225,7 +230,10 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
 
   async function saveRoutine(routine: Routine) {
     if (!routine.name.trim()) { setToast('請輸入菜單名稱'); return }
-    if (routine.exercises.some((exercise) => !exercise.name.trim())) { setToast('請填寫所有動作名稱'); return }
+    const currentDefinitions = await repository.getExerciseDefinitions()
+    if (routine.exercises.some((exercise) => !currentDefinitions.some((definition) => definition.id === exercise.exerciseDefinitionId))) {
+      setToast('菜單中有找不到的動作，請重新選擇'); return
+    }
     let exercises: RoutineExercise[]
     try {
       exercises = routine.exercises.map((exercise) => ({ ...exercise, ...normalizeTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) }))
@@ -239,6 +247,27 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
     setEditingRoutine(null)
     setScreen('routine')
     setToast('菜單已儲存')
+  }
+
+  async function saveDefinition(definition: ExerciseDefinition) {
+    await repository.saveExerciseDefinition(definition)
+    setDefinitions((current) => current.some((item) => item.id === definition.id)
+      ? current.map((item) => item.id === definition.id ? definition : item) : [...current, definition])
+    setToast('動作已儲存')
+  }
+
+  async function archiveDefinition(id: string, archived: boolean) {
+    await repository.archiveExerciseDefinition(id, archived)
+    setToast(archived ? '動作已封存' : '動作已取消封存')
+  }
+
+  async function mergeDefinitions(sourceId: string, targetId: string) {
+    await writeQueue.current
+    const result = await repository.mergeExerciseDefinitions(sourceId, targetId)
+    const resumed = await repository.getActiveSession()
+    activeRef.current = resumed
+    setActiveSession(resumed)
+    setToast(`已合併 ${result.routines} 份菜單、${result.sessions} 筆訓練紀錄`)
   }
 
   async function deleteRoutine(routine: Routine) {
@@ -288,7 +317,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
         })}
       />}
       {screen === 'routine' && selectedRoutine && <RoutineScreen
-        routine={selectedRoutine} unit={settings.unit} sessions={completed}
+        routine={selectedRoutine} definitions={definitions} unit={settings.unit} sessions={completed}
         onBack={() => setScreen('home')} onStart={() => void startRoutine(selectedRoutine)}
         onEdit={() => setEditingRoutine(selectedRoutine)} onDelete={() => void deleteRoutine(selectedRoutine)}
       />}
@@ -304,11 +333,12 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       />}
       {screen === 'summary' && summarySession && <WorkoutSummary session={summarySession} onHome={() => setScreen('home')} onHistory={() => { setScreen('history'); setHistoryDetailId(summarySession.id) }} />}
       {screen === 'history' && <HistoryScreen sessions={completed} onOpen={setHistoryDetailId} />}
-      {screen === 'progress' && <ProgressScreen sessions={completed} unit={settings.unit} />}
+      {screen === 'progress' && <ProgressScreen sessions={completed} definitions={definitions} unit={settings.unit} />}
       {screen === 'settings' && <SettingsScreen
         settings={settings} persisted={persisted} onChange={(patch) => void changeSettings(patch)}
         onExport={() => void exportBackup(repository)} onExportCsv={() => void exportCsv(repository)}
         onImport={() => importInput.current?.click()}
+        onOpenLibrary={() => setScreen('library')}
         onRequestPersistence={async () => {
           if (!navigator.storage?.persist) { setToast('此瀏覽器不支援持久儲存設定'); return }
           const result = await navigator.storage.persist()
@@ -316,13 +346,17 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
           setToast(result ? '已加強本機資料保存' : '瀏覽器未啟用持久儲存，請定期匯出備份')
         }}
       />}
+      {screen === 'library' && <ExerciseLibrary definitions={definitions} routines={routines} sessions={sessions}
+        onBack={() => setScreen('settings')} onSave={saveDefinition} onArchive={archiveDefinition} onMerge={mergeDefinitions} />}
       {!['routine', 'workout', 'summary'].includes(screen) && <BottomNav screen={screen} onChange={setScreen} />}
       {editingRoutine && <RoutineEditor
-        routine={editingRoutine} unit={settings.unit} onClose={() => setEditingRoutine(null)}
+        routine={editingRoutine} definitions={definitions} unit={settings.unit} onClose={() => setEditingRoutine(null)}
+        onCreateDefinition={saveDefinition}
         onSave={(routine) => void saveRoutine(routine)}
       />}
       {showAddExercise && <AddExerciseModal
-        unit={settings.unit} onClose={() => setShowAddExercise(false)} onAdd={addWorkoutExercise}
+        unit={settings.unit} definitions={definitions} onClose={() => setShowAddExercise(false)} onAdd={addWorkoutExercise}
+        onCreateDefinition={saveDefinition}
       />}
       {historyDetail && <HistoryDetail
         session={historyDetail} unit={settings.unit} onClose={() => setHistoryDetailId(null)}
@@ -396,8 +430,9 @@ function HomeScreen({ routines, sessions, activeSession, currentWeekCount, onOpe
   </main>
 }
 
-function RoutineScreen({ routine, unit, sessions, onBack, onStart, onEdit, onDelete }: {
+function RoutineScreen({ routine, definitions, unit, sessions, onBack, onStart, onEdit, onDelete }: {
   routine: Routine
+  definitions: ExerciseDefinition[]
   unit: AppSettings['unit']
   sessions: WorkoutSession[]
   onBack: () => void
@@ -415,11 +450,11 @@ function RoutineScreen({ routine, unit, sessions, onBack, onStart, onEdit, onDel
         <span><strong>上次訓練</strong><small>{last ? formatDate(last.startedAt) : '完成第一堂訓練後，這裡會顯示紀錄'}</small></span></div>
       <div className="section-heading compact"><div><span className="eyebrow">EXERCISE LIST</span><h2>動作安排</h2></div><span className="count-chip">{routine.exercises.length} 個</span></div>
       <div className="exercise-list">
-        {routine.exercises.map((exercise, index) => <div className="exercise-list-item" key={exercise.id}>
+        {routine.exercises.map((exercise, index) => { const definition = definitions.find((item) => item.id === exercise.exerciseDefinitionId); return <div className="exercise-list-item" key={exercise.id}>
           <span className="exercise-list-number">{String(index + 1).padStart(2, '0')}</span>
-          <div className="exercise-list-main"><strong>{exercise.name}</strong><small>{exercise.equipment || '未設定器材'}{exercise.note && ` · ${exercise.note}`}</small></div>
+          <div className="exercise-list-main"><strong>{definition?.name ?? '找不到動作'}</strong><small>{definition ? definitionSubtitle(definition) : '動作定義遺失'}{exercise.note && ` · ${exercise.note}`}{definition?.archived && ' · 已封存'}</small></div>
           <div className="exercise-list-target"><strong>{exercise.weight === null ? '—' : `${displayWeight(exercise.weight, unit)} ${unit}`}</strong><small>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) || `${exercise.reps ?? '—'} 下`} × {exercise.sets} 組</small></div>
-        </div>)}
+        </div> })}
         {routine.exercises.length === 0 && <div className="empty-inline">這份菜單還沒有動作。點右上角編輯開始加入。</div>}
       </div>
       <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這份菜單</button>
@@ -462,10 +497,10 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
       <div className="workout-exercises">
         {session.exercises.map((exercise, exerciseIndex) => {
           const done = exercise.sets.filter((set) => set.done).length
-          const previous = findPreviousPerformance(exercise, previousSessions, session.id, session.routineId)
+          const previous = findPreviousPerformance(exercise.exerciseDefinitionId, previousSessions, session.id)
           const suggestion = previous ? getProgressionSuggestion(exercise.targetRepsMin, exercise.targetRepsMax, previous.sets) : null
           return <section className="workout-exercise-card" key={exercise.id}>
-            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}</p>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) && <small className="workout-target">目標 {formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax)}</small>}{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
+            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{definitionSubtitle(exercise)}</p>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) && <small className="workout-target">目標 {formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax)}</small>}{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
             {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下{set.rir !== null && <em> · {formatRir(set.rir)}</em>}</span>)}</div>{suggestion && suggestion.kind !== 'none' && <p className="progression-suggestion"><strong>下次建議</strong>{suggestion.text}</p>}</div>}
             <div className="set-table-header"><span>組別</span><span>重量 <small>{unit}</small></span><span>次數</span><span>完成</span><span /></div>
             <div className="set-table-body">{exercise.sets.map((set, index) => <div className="set-entry" key={set.id}><div className={`set-row ${set.done ? 'is-done' : ''}`}>
@@ -602,30 +637,33 @@ function HistoryScreen({ sessions, onOpen }: {
   </div></main>
 }
 
-function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: AppSettings['unit'] }) {
+function ProgressScreen({ sessions, definitions, unit }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[], unit: AppSettings['unit'] }) {
+  const [tab, setTab] = useState<'exercises' | 'muscles'>('exercises')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [selectedPrWeightKg, setSelectedPrWeightKg] = useState<number | null>(null)
   const records = useMemo(() => {
-    const map = new Map<string, { key: string, name: string, equipment: string, sourceExerciseId: string, routineId: string | null, points: { date: string, max: number }[] }>()
+    const byId = new Map(definitions.map((definition) => [definition.id, definition]))
+    const map = new Map<string, { key: string, definition: ExerciseDefinition, points: { date: string, max: number }[] }>()
     for (const session of [...sessions].reverse()) {
+      const maxById = new Map<string, number>()
       for (const exercise of session.exercises) {
         const done = exercise.sets.filter((set) => set.done && set.kind === 'working' && set.weight !== null)
         if (done.length === 0) continue
-        const key = exerciseKey(exercise.name, exercise.equipment)
-        const current = map.get(key) ?? { key, name: exercise.name, equipment: exercise.equipment, sourceExerciseId: exercise.sourceExerciseId, routineId: session.routineId, points: [] }
-        current.sourceExerciseId = exercise.sourceExerciseId
-        current.routineId = session.routineId
-        current.points.push({
-          date: session.startedAt,
-          max: Math.max(...done.map((set) => set.weight ?? 0)),
-        })
+        const key = exercise.exerciseDefinitionId
+        maxById.set(key, Math.max(maxById.get(key) ?? 0, ...done.map((set) => set.weight ?? 0)))
+      }
+      for (const [key, max] of maxById) {
+        const definition = byId.get(key)
+        if (!definition) continue
+        const current = map.get(key) ?? { key, definition, points: [] }
+        current.points.push({ date: session.startedAt, max })
         map.set(key, current)
       }
     }
-    return [...map.values()].sort((a, b) => b.points.length - a.points.length || a.name.localeCompare(b.name, 'zh-TW'))
-  }, [sessions])
+    return [...map.values()].sort((a, b) => b.points.length - a.points.length || a.definition.name.localeCompare(b.definition.name, 'zh-TW'))
+  }, [sessions, definitions])
   const chosen = records.find((record) => record.key === selectedKey) ?? records[0]
-  const exerciseHistory = useMemo(() => chosen ? findExerciseHistory(chosen, sessions, chosen.routineId) : [], [chosen, sessions])
+  const exerciseHistory = useMemo(() => chosen ? findExerciseHistory(chosen.key, sessions) : [], [chosen, sessions])
   const historyPoints = useMemo(() => [...exerciseHistory].reverse().flatMap((entry) => {
     const weights = entry.sets.filter((set) => set.kind === 'working' && set.weight !== null).map((set) => set.weight!)
     return weights.length ? [{ date: entry.date, max: Math.max(...weights) }] : []
@@ -638,11 +676,13 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
   return <main className="page page-with-nav"><div className="content-wrap">
     <BrandHeader eyebrow="數據趨勢" />
     <div className="page-title"><span className="eyebrow">GET STRONGER</span><h1>進步軌跡<span className="title-dot">.</span></h1><p>讓重量替你說話。</p></div>
+    <div className="progress-tabs"><button className={tab === 'exercises' ? 'selected' : ''} onClick={() => setTab('exercises')}>動作</button><button className={tab === 'muscles' ? 'selected' : ''} onClick={() => setTab('muscles')}>肌群</button></div>
+    {tab === 'muscles' ? <MuscleProgress sessions={sessions} definitions={definitions} /> : <>
     {records.length === 0 ? <EmptyState icon={<LineChart size={34} />} title="進步正在累積" description="完成訓練並勾選組別後，這裡會顯示每個動作的重量變化。" /> : <>
       <div className="section-heading compact"><div><span className="eyebrow">EXERCISE</span><h2>選擇動作</h2></div></div>
-      <div className="exercise-picker">{records.map((record) => <button key={record.key} className={chosen?.key === record.key ? 'selected' : ''} onClick={() => { setSelectedKey(record.key); setSelectedPrWeightKg(null) }}>{record.name}</button>)}</div>
+      <div className="exercise-picker">{records.map((record) => <button key={record.key} className={chosen?.key === record.key ? 'selected' : ''} onClick={() => { setSelectedKey(record.key); setSelectedPrWeightKg(null) }}>{record.definition.name}<small>{definitionSubtitle(record.definition)}</small></button>)}</div>
       {chosen && <>
-        <div className="progress-main-card"><div className="progress-main-header"><span><span className="eyebrow">MAX WEIGHT</span><h2>{chosen.name}</h2><small>{chosen.equipment || '自訂動作'} · {historyPoints.length} 次訓練</small></span><span className="progress-icon"><Dumbbell size={24} /></span></div>
+        <div className="progress-main-card"><div className="progress-main-header"><span><span className="eyebrow">MAX WEIGHT</span><h2>{chosen.definition.name}</h2><small>{definitionSubtitle(chosen.definition)} · {historyPoints.length} 次訓練</small></span><span className="progress-icon"><Dumbbell size={24} /></span></div>
           <div className="progress-big-number">{Math.round(best * converter * 10) / 10}<span>{unit}</span></div><span className="progress-big-label">最高完成重量</span>
           <ProgressChart values={historyPoints.map((point) => point.max * converter)} />
           <div className="chart-labels"><span>{historyPoints[0] && formatDate(historyPoints[0].date, { month: 'numeric', day: 'numeric' })}</span><span>{current && formatDate(current.date, { month: 'numeric', day: 'numeric' })}</span></div>
@@ -661,7 +701,24 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
         </section>)}</div>
       </>}
     </>}
+    </>}
   </div></main>
+}
+
+function MuscleProgress({ sessions, definitions }: { sessions: WorkoutSession[], definitions: ExerciseDefinition[] }) {
+  const [weekOffset, setWeekOffset] = useState(0)
+  const week = shiftLocalWeek(startOfLocalWeek(new Date()), weekOffset)
+  const stats = weeklyMuscleStats(sessions, definitions, week)
+  const nextWeekStart = shiftLocalWeek(week, 1)
+  const canGoNext = weekOffset < 0 || sessions.some((session) => session.status === 'completed' && new Date(session.startedAt).getTime() >= nextWeekStart.getTime())
+  const visible = stats.muscles.filter((row) => row.sets > 0)
+  const maximum = Math.max(1, ...visible.map((row) => row.sets))
+  return <section className="muscle-progress">
+    <div className="muscle-week-header"><div><span className="eyebrow">PRIMARY MUSCLE SETS</span><h2>{weekOffset === 0 ? '本週' : `${formatDate(week.toISOString(), { month: 'numeric', day: 'numeric' })} 起`}</h2><p>{formatDate(week.toISOString(), { year: 'numeric', month: 'numeric', day: 'numeric' })} ～ {formatDate(nextWeekStart.toISOString(), { month: 'numeric', day: 'numeric' })}（週一前）</p></div><div className="calendar-controls"><button onClick={() => setWeekOffset((offset) => offset - 1)} aria-label="上一週"><ChevronLeft size={19} /></button><button onClick={() => setWeekOffset((offset) => offset + 1)} disabled={!canGoNext} aria-label="下一週"><ChevronRight size={19} /></button></div></div>
+    <p className="muscle-explainer">只計已完成訓練的正式完成組。若一個動作有多個主要肌群，每個肌群各計一組。</p>
+    {visible.length ? <div className="muscle-rows">{visible.map((row) => <div className="muscle-row" key={row.muscle}><div><strong>{MUSCLE_LABELS[row.muscle]}</strong><span>{row.sets} 組 · {row.days} 天</span></div><div className="muscle-bar"><span style={{ width: `${row.sets / maximum * 100}%` }} /></div></div>)}</div> : <p className="library-empty">這週尚無已分類的正式組。</p>}
+    <div className="unclassified-card"><strong>未分類 {stats.unclassifiedSets} 組</strong><small>可到動作庫補上主要肌群，過去統計會一起更新。</small></div>
+  </section>
 }
 
 function ProgressChart({ values }: { values: number[] }) {
@@ -683,13 +740,14 @@ function ProgressChart({ values }: { values: number[] }) {
   </svg>
 }
 
-function SettingsScreen({ settings, persisted, onChange, onExport, onExportCsv, onImport, onRequestPersistence }: {
+function SettingsScreen({ settings, persisted, onChange, onExport, onExportCsv, onImport, onOpenLibrary, onRequestPersistence }: {
   settings: AppSettings
   persisted: boolean | null
   onChange: (patch: Partial<AppSettings>) => void
   onExport: () => void
   onExportCsv: () => void
   onImport: () => void
+  onOpenLibrary: () => void
   onRequestPersistence: () => void
 }) {
   return <main className="page page-with-nav"><div className="content-wrap">
@@ -700,6 +758,7 @@ function SettingsScreen({ settings, persisted, onChange, onExport, onExportCsv, 
         <div className="setting-row"><span className="setting-icon"><Timer size={19} /></span><span className="setting-copy"><strong>組間休息計時</strong><small>完成一組後自動開始</small></span><button className={`toggle ${settings.restTimerEnabled ? 'on' : ''}`} role="switch" aria-checked={settings.restTimerEnabled} onClick={() => onChange({ restTimerEnabled: !settings.restTimerEnabled })}><span /></button></div>
       </div>
     </section>
+    <section className="settings-section"><div className="section-heading compact"><div><span className="eyebrow">EXERCISES</span><h2>動作管理</h2></div></div><div className="setting-card"><button className="setting-row setting-button" onClick={onOpenLibrary}><span className="setting-icon"><Dumbbell size={19} /></span><span className="setting-copy"><strong>動作庫</strong><small>建立、分類、封存與合併全域動作</small></span><ChevronRight size={18} /></button></div></section>
     <section className="settings-section"><div className="section-heading compact"><div><span className="eyebrow">YOUR DATA</span><h2>資料管理</h2></div></div>
       <div className="setting-card">
         <button className="setting-row setting-button" onClick={onExport}><span className="setting-icon"><Download size={19} /></span><span className="setting-copy"><strong>匯出完整備份</strong><small>儲存為 JSON，可完整還原</small></span><ChevronRight size={18} /></button>
@@ -742,7 +801,7 @@ function HistoryDetail({ session, unit, onClose, onDelete }: {
       <div className="sheet-scroll">
         <p className="sheet-date">{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
         <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>訓練時間</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
-        <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{exercise.equipment || '未設定器材'}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
+        <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{definitionSubtitle(exercise)}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
           <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下{set.rir !== null && ` · ${formatRir(set.rir)}`}</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
         </section>)}</div>
         <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這筆紀錄</button>
@@ -751,13 +810,17 @@ function HistoryDetail({ session, unit, onClose, onDelete }: {
   </div>
 }
 
-function RoutineEditor({ routine, unit, onClose, onSave }: {
+function RoutineEditor({ routine, definitions, unit, onClose, onSave, onCreateDefinition }: {
   routine: Routine
+  definitions: ExerciseDefinition[]
   unit: AppSettings['unit']
   onClose: () => void
   onSave: (routine: Routine) => void
+  onCreateDefinition: (definition: ExerciseDefinition) => Promise<void>
 }) {
   const [draft, setDraft] = useState<Routine>(() => structuredClone(routine))
+  const [selecting, setSelecting] = useState(false)
+  const [creating, setCreating] = useState<ExerciseDefinition | null>(null)
   function patchExercise(id: string, patch: Partial<RoutineExercise>) {
     setDraft((current) => ({ ...current, exercises: current.exercises.map((exercise) => exercise.id === id ? { ...exercise, ...patch } : exercise) }))
   }
@@ -768,11 +831,12 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
     ;[next[index], next[nextIndex]] = [next[nextIndex], next[index]]
     setDraft({ ...draft, exercises: next })
   }
-  function addExercise() {
+  function addExercise(definition: ExerciseDefinition) {
     setDraft((current) => ({ ...current, exercises: [...current.exercises, {
-      id: createId(), name: '', equipment: '', weight: null, reps: 10,
+      id: createId(), exerciseDefinitionId: definition.id, weight: null, reps: 10,
       targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '',
     }] }))
+    setSelecting(false)
   }
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <div className="sheet editor-sheet" role="dialog" aria-modal="true" aria-label="編輯訓練菜單">
@@ -781,9 +845,9 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
         <div className="form-grid"><label className="form-field"><span>菜單名稱</span><input value={draft.name} placeholder="例如 Push day" onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
           <label className="form-field"><span>訓練部位／描述</span><input value={draft.label} placeholder="例如 胸・肩・三頭" onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></label></div>
         <div className="editor-section-heading"><div><span className="eyebrow">EXERCISES</span><h3>動作安排</h3></div><span>{draft.exercises.length} 個動作</span></div>
-        <div className="editor-exercises">{draft.exercises.map((exercise, index) => <div className="editor-exercise" key={exercise.id}>
-          <div className="editor-exercise-top"><span className="editor-index">{String(index + 1).padStart(2, '0')}</span><input aria-label="動作名稱" value={exercise.name} placeholder="動作名稱" onChange={(event) => patchExercise(exercise.id, { name: event.target.value })} /><button onClick={() => moveExercise(index, -1)} disabled={index === 0} aria-label="上移動作">↑</button><button onClick={() => moveExercise(index, 1)} disabled={index === draft.exercises.length - 1} aria-label="下移動作">↓</button><button onClick={() => setDraft({ ...draft, exercises: draft.exercises.filter((item) => item.id !== exercise.id) })} aria-label="刪除動作"><Trash2 size={16} /></button></div>
-          <div className="editor-exercise-grid"><label className="form-field wide"><span>器材／變化</span><input value={exercise.equipment} placeholder="例如 槓鈴、Cable" onChange={(event) => patchExercise(exercise.id, { equipment: event.target.value })} /></label>
+        <div className="editor-exercises">{draft.exercises.map((exercise, index) => { const definition = definitions.find((item) => item.id === exercise.exerciseDefinitionId); return <div className="editor-exercise" key={exercise.id}>
+          <div className="editor-exercise-top"><span className="editor-index">{String(index + 1).padStart(2, '0')}</span><div className="editor-exercise-name"><strong>{definition?.name ?? '找不到動作'}</strong><small>{definition ? definitionSubtitle(definition) : '動作定義遺失'}{definition?.archived && ' · 已封存'}</small></div><button onClick={() => moveExercise(index, -1)} disabled={index === 0} aria-label="上移動作">↑</button><button onClick={() => moveExercise(index, 1)} disabled={index === draft.exercises.length - 1} aria-label="下移動作">↓</button><button onClick={() => setDraft({ ...draft, exercises: draft.exercises.filter((item) => item.id !== exercise.id) })} aria-label="刪除動作"><Trash2 size={16} /></button></div>
+          <div className="editor-exercise-grid">
             <label className="form-field"><span>重量 {unit}</span><NumberInput value={displayWeight(exercise.weight, unit)} onChange={(value) => patchExercise(exercise.id, { weight: weightToKg(value, unit) })} placeholder="—" ariaLabel="預設重量" /></label>
             <label className="form-field"><span>預設次數</span><NumberInput value={exercise.reps === null ? '' : String(exercise.reps)} onChange={(value) => patchExercise(exercise.id, { reps: value })} placeholder="—" ariaLabel="預設次數" integer /></label>
             <div className="form-field wide"><span>目標次數</span><div className="target-range-input"><NumberInput value={exercise.targetRepsMin === null ? '' : String(exercise.targetRepsMin)} onChange={(value) => patchExercise(exercise.id, { targetRepsMin: value })} placeholder="下限" ariaLabel="目標次數下限" integer /><span>～</span><NumberInput value={exercise.targetRepsMax === null ? '' : String(exercise.targetRepsMax)} onChange={(value) => patchExercise(exercise.id, { targetRepsMax: value })} placeholder="上限" ariaLabel="目標次數上限" integer /></div></div>
@@ -791,32 +855,38 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
             <label className="form-field"><span>休息 秒</span><NumberInput value={String(exercise.restSeconds)} onChange={(value) => patchExercise(exercise.id, { restSeconds: Math.max(0, value ?? 0) })} placeholder="90" ariaLabel="休息秒數" integer /></label>
             <label className="form-field full"><span>備註</span><input value={exercise.note} placeholder="例如 座椅高度、握法" onChange={(event) => patchExercise(exercise.id, { note: event.target.value })} /></label>
           </div>
-        </div>)}</div>
-        <button className="add-exercise-button" onClick={addExercise}><Plus size={18} /> 新增動作</button>
+        </div> })}</div>
+        {selecting ? <ExercisePicker definitions={definitions} onSelect={addExercise} onCreate={() => setCreating(newDefinition())} /> : <button className="add-exercise-button" onClick={() => setSelecting(true)}><Plus size={18} /> 從動作庫新增</button>}
       </div>
       <div className="sheet-footer"><button className="primary-button" onClick={() => onSave(draft)}><Check size={19} /> 儲存菜單</button></div>
     </div>
+    {creating && <ExerciseDefinitionEditor definition={creating} onClose={() => setCreating(null)} onSave={async (definition) => { await onCreateDefinition(definition); addExercise(definition); setCreating(null) }} />}
   </div>
 }
 
-function AddExerciseModal({ unit, onClose, onAdd }: {
+function AddExerciseModal({ unit, definitions, onClose, onAdd, onCreateDefinition }: {
   unit: AppSettings['unit']
+  definitions: ExerciseDefinition[]
   onClose: () => void
-  onAdd: (exercise: RoutineExercise) => void
+  onAdd: (definition: ExerciseDefinition, exercise: RoutineExercise) => void
+  onCreateDefinition: (definition: ExerciseDefinition) => Promise<void>
 }) {
   const [exercise, setExercise] = useState<RoutineExercise>({
-    id: createId(), name: '', equipment: '', weight: null, reps: 10,
+    id: createId(), exerciseDefinitionId: '', weight: null, reps: 10,
     targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '',
   })
+  const [creating, setCreating] = useState<ExerciseDefinition | null>(null)
+  const selected = definitions.find((item) => item.id === exercise.exerciseDefinitionId)
   const patch = (value: Partial<RoutineExercise>) => setExercise((current) => ({ ...current, ...value }))
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <div className="sheet small-sheet" role="dialog" aria-modal="true" aria-label="加入動作">
       <div className="sheet-header"><div><span className="eyebrow">ADD EXERCISE</span><h2>加入動作</h2></div><button className="icon-button" onClick={onClose} aria-label="關閉"><X size={21} /></button></div>
-      <div className="sheet-scroll"><div className="form-grid"><label className="form-field"><span>動作名稱</span><input value={exercise.name} autoFocus placeholder="例如 上斜胸推" onChange={(event) => patch({ name: event.target.value })} /></label><label className="form-field"><span>器材／變化</span><input value={exercise.equipment} placeholder="例如 槓鈴" onChange={(event) => patch({ equipment: event.target.value })} /></label></div>
-        <div className="quick-exercise-grid"><label className="form-field"><span>重量 {unit}</span><NumberInput value={displayWeight(exercise.weight, unit)} onChange={(value) => patch({ weight: weightToKg(value, unit) })} placeholder="—" ariaLabel="重量" /></label><label className="form-field"><span>次數</span><NumberInput value={exercise.reps === null ? '' : String(exercise.reps)} onChange={(value) => patch({ reps: value })} placeholder="10" ariaLabel="次數" integer /></label><label className="form-field"><span>組數</span><NumberInput value={String(exercise.sets)} onChange={(value) => patch({ sets: Math.max(1, value ?? 1) })} placeholder="3" ariaLabel="組數" integer /></label></div>
+      <div className="sheet-scroll">{selected ? <><div className="selected-definition"><strong>{selected.name}</strong><small>{definitionSubtitle(selected)}</small><button onClick={() => patch({ exerciseDefinitionId: '' })}>更換</button></div>
+        <div className="quick-exercise-grid"><label className="form-field"><span>重量 {unit}</span><NumberInput value={displayWeight(exercise.weight, unit)} onChange={(value) => patch({ weight: weightToKg(value, unit) })} placeholder="—" ariaLabel="重量" /></label><label className="form-field"><span>次數</span><NumberInput value={exercise.reps === null ? '' : String(exercise.reps)} onChange={(value) => patch({ reps: value })} placeholder="10" ariaLabel="次數" integer /></label><label className="form-field"><span>組數</span><NumberInput value={String(exercise.sets)} onChange={(value) => patch({ sets: Math.max(1, value ?? 1) })} placeholder="3" ariaLabel="組數" integer /></label></div></> : <ExercisePicker definitions={definitions} onSelect={(definition) => patch({ exerciseDefinitionId: definition.id })} onCreate={() => setCreating(newDefinition())} />}
       </div>
-      <div className="sheet-footer"><button className="primary-button" disabled={!exercise.name.trim()} onClick={() => onAdd({ ...exercise, name: exercise.name.trim() })}><Plus size={19} /> 加入訓練</button></div>
+      <div className="sheet-footer"><button className="primary-button" disabled={!selected} onClick={() => selected && onAdd(selected, exercise)}><Plus size={19} /> 加入訓練</button></div>
     </div>
+    {creating && <ExerciseDefinitionEditor definition={creating} onClose={() => setCreating(null)} onSave={async (definition) => { await onCreateDefinition(definition); patch({ exerciseDefinitionId: definition.id }); setCreating(null) }} />}
   </div>
 }
 

@@ -1,6 +1,7 @@
-import type { AppSettings, Routine, WorkoutSession } from '../types'
+import type { AppSettings, ExerciseDefinition, Routine, WorkoutSession } from '../types'
 
 export type WorkoutData = {
+  exerciseDefinitions: ExerciseDefinition[]
   routines: Routine[]
   sessions: WorkoutSession[]
   settings: AppSettings
@@ -19,13 +20,21 @@ export class ActiveSessionExistsError extends Error {
 // Storage contract shared by web and future native adapters:
 // - Routines are ordered by order; sessions by startedAt, newest first.
 // - Settings always exists and has id === 'main' after initialize().
+// - Exercise definitions keep stable IDs and are archived rather than deleted.
+//   Existing routine and session references remain readable after archival.
 // - At most one session may have status === 'active'. saveSession() enforces this
 //   atomically, and getActiveSession() reports an existing violation.
 // - replaceAll() is one atomic operation: every write commits or none do.
+// - mergeExerciseDefinitions() updates all routine and session references and
+//   archives the source in one transaction; session display snapshots remain.
 // - Every successful write is emitted asynchronously by the separate change
 //   source after commit; failed writes emit no committed value.
 export interface WorkoutRepository {
   initialize(): Promise<void>
+  getExerciseDefinitions(): Promise<ExerciseDefinition[]>
+  saveExerciseDefinition(definition: ExerciseDefinition): Promise<void>
+  archiveExerciseDefinition(id: string, archived: boolean): Promise<void>
+  mergeExerciseDefinitions(sourceId: string, targetId: string): Promise<{ routines: number, sessions: number }>
   getRoutines(): Promise<Routine[]>
   getSessions(): Promise<WorkoutSession[]>
   getSession(id: string): Promise<WorkoutSession | null>

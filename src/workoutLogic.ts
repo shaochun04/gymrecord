@@ -1,32 +1,20 @@
-import type { SessionExercise, SetLog, Unit, WorkoutSession } from './types'
+import type { SetLog, Unit, WorkoutSession } from './types'
 import { displayWeight, weightToKg } from './utils'
 
-export type ExerciseReference = Pick<SessionExercise, 'sourceExerciseId' | 'name' | 'equipment'>
-
-function matchingExercise(reference: ExerciseReference, session: WorkoutSession, currentRoutineId: string | null) {
-  const byId = reference.sourceExerciseId && session.exercises.find((item) => item.sourceExerciseId === reference.sourceExerciseId)
-  if (byId) return byId
-  // Source IDs belong to routine exercises. Across routines, the same movement has a different ID.
-  const allowNameMatch = !reference.sourceExerciseId || session.routineId !== currentRoutineId
-  return session.exercises.find((item) =>
-    (allowNameMatch || !item.sourceExerciseId) &&
-    item.name === reference.name && item.equipment === reference.equipment,
-  )
-}
-
-export function findExerciseHistory(reference: ExerciseReference, sessions: WorkoutSession[], currentRoutineId: string | null, currentSessionId?: string) {
+export function findExerciseHistory(exerciseDefinitionId: string, sessions: WorkoutSession[], currentSessionId?: string) {
   return sessions
     .filter((session) => session.status === 'completed' && session.id !== currentSessionId)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
     .flatMap((session) => {
-      const match = matchingExercise(reference, session, currentRoutineId)
-      const sets = match?.sets.filter((set) => set.done).map((set) => ({ ...set })) ?? []
+      const sets = session.exercises
+        .filter((exercise) => exercise.exerciseDefinitionId === exerciseDefinitionId)
+        .flatMap((exercise) => exercise.sets.filter((set) => set.done).map((set) => ({ ...set })))
       return sets.length ? [{ sessionId: session.id, date: session.startedAt, routineName: session.routineName, sets }] : []
     })
 }
 
-export function findPreviousPerformance(reference: ExerciseReference, sessions: WorkoutSession[], currentSessionId?: string, currentRoutineId: string | null = null) {
-  const previous = findExerciseHistory(reference, sessions, currentRoutineId, currentSessionId)
+export function findPreviousPerformance(exerciseDefinitionId: string, sessions: WorkoutSession[], currentSessionId?: string) {
+  const previous = findExerciseHistory(exerciseDefinitionId, sessions, currentSessionId)
     .find((entry) => entry.sets.some((set) => set.kind === 'working'))
   return previous ? { date: previous.date, sets: previous.sets.filter((set) => set.kind === 'working') } : null
 }

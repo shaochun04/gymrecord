@@ -1,6 +1,7 @@
-import type { AppSettings, Routine, WorkoutSession } from '../types'
+import type { AppSettings, ExerciseDefinition, Routine, WorkoutSession } from '../types'
 
 export type WorkoutChange =
+  | { kind: 'exerciseDefinitions', value: ExerciseDefinition[] }
   | { kind: 'routines', value: Routine[] }
   | { kind: 'sessions', value: WorkoutSession[] }
   | { kind: 'settings', value: AppSettings }

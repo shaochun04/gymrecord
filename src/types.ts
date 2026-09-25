@@ -1,9 +1,21 @@
 export type Unit = 'kg' | 'lb'
 
-export type RoutineExercise = {
+export const MUSCLE_GROUPS = ['chest', 'lats', 'upperBack', 'traps', 'frontDelts', 'sideDelts', 'rearDelts', 'biceps', 'triceps', 'forearms', 'quads', 'hamstrings', 'glutes', 'adductors', 'calves', 'core', 'lowerBack'] as const
+export type MuscleGroup = typeof MUSCLE_GROUPS[number]
+
+export type ExerciseDefinition = {
   id: string
   name: string
   equipment: string
+  variation: string
+  primaryMuscles: MuscleGroup[]
+  secondaryMuscles: MuscleGroup[]
+  archived: boolean
+}
+
+export type RoutineExercise = {
+  id: string
+  exerciseDefinitionId: string
   weight: number | null
   reps: number | null
   targetRepsMin: number | null
@@ -35,8 +47,10 @@ export type SetLog = {
 export type SessionExercise = {
   id: string
   sourceExerciseId: string
+  exerciseDefinitionId: string
   name: string
   equipment: string
+  variation: string
   note: string
   restSeconds: number
   targetRepsMin: number | null

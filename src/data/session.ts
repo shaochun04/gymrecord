@@ -1,8 +1,8 @@
-import type { Routine, WorkoutSession } from '../types'
+import type { ExerciseDefinition, Routine, WorkoutSession } from '../types'
 import { createId } from '../id'
 import { findPreviousPerformance } from '../workoutLogic'
 
-export function makeSession(routine: Routine, sessions: WorkoutSession[] = []): WorkoutSession {
+export function makeSession(routine: Routine, definitions: ExerciseDefinition[], sessions: WorkoutSession[] = []): WorkoutSession {
   return {
     id: createId(),
     routineId: routine.id,
@@ -12,14 +12,16 @@ export function makeSession(routine: Routine, sessions: WorkoutSession[] = []): 
     status: 'active',
     restEndsAt: null,
     exercises: routine.exercises.map((exercise) => {
-      const previousSets = findPreviousPerformance({
-        sourceExerciseId: exercise.id, name: exercise.name, equipment: exercise.equipment,
-      }, sessions, undefined, routine.id)?.sets ?? []
+      const definition = definitions.find((item) => item.id === exercise.exerciseDefinitionId)
+      if (!definition) throw new Error('菜單引用的動作定義不存在')
+      const previousSets = findPreviousPerformance(definition.id, sessions)?.sets ?? []
       return {
         id: createId(),
         sourceExerciseId: exercise.id,
-        name: exercise.name,
-        equipment: exercise.equipment,
+        exerciseDefinitionId: definition.id,
+        name: definition.name,
+        equipment: definition.equipment,
+        variation: definition.variation,
         note: exercise.note,
         restSeconds: exercise.restSeconds,
         targetRepsMin: exercise.targetRepsMin,

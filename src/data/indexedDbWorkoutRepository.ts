@@ -1,11 +1,13 @@
 import Dexie, { liveQuery, type EntityTable } from 'dexie'
-import { makeInitialRoutines } from '../seed'
-import type { AppSettings, Routine, WorkoutSession } from '../types'
+import { makeInitialData } from '../seed'
+import type { AppSettings, ExerciseDefinition, Routine, WorkoutSession } from '../types'
+import { normalizeExerciseText, validateDefinition } from '../exerciseDefinitions'
 import type { WorkoutChangeSource } from './workoutChanges'
 import { ActiveSessionExistsError, MultipleActiveSessionsError, type WorkoutData, type WorkoutRepository } from './workoutRepository'
-import { migrateRoutineV1, migrateSessionV1, type RoutineV1, type WorkoutSessionV1 } from './modelMigration'
+import { migrateRoutineV1, migrateSessionV1, migrateWorkoutDataV2, type RoutineV1, type RoutineV2, type WorkoutSessionV1, type WorkoutSessionV2 } from './modelMigration'
 
 const db = new Dexie('gymrecord') as Dexie & {
+  exerciseDefinitions: EntityTable<ExerciseDefinition, 'id'>
   routines: EntityTable<Routine, 'id'>
   sessions: EntityTable<WorkoutSession, 'id'>
   settings: EntityTable<AppSettings, 'id'>
@@ -30,13 +32,58 @@ db.version(2).stores({
   })
 })
 
+db.version(3).stores({
+  exerciseDefinitions: 'id, name, equipment, variation, archived',
+  routines: 'id, order, name',
+  sessions: 'id, status, startedAt, routineId',
+  settings: 'id',
+}).upgrade(async (transaction) => {
+  const routines = await transaction.table('routines').toArray() as RoutineV2[]
+  const sessions = await transaction.table('sessions').toArray() as WorkoutSessionV2[]
+  const migrated = migrateWorkoutDataV2({ routines, sessions })
+  await transaction.table('exerciseDefinitions').bulkPut(migrated.exerciseDefinitions)
+  await transaction.table('routines').bulkPut(migrated.routines)
+  await transaction.table('sessions').bulkPut(migrated.sessions)
+})
+
 export class IndexedDbWorkoutRepository implements WorkoutRepository {
   async initialize() {
-    await db.transaction('rw', db.routines, db.settings, async () => {
-      if (await db.routines.count() === 0) await db.routines.bulkPut(makeInitialRoutines())
+    await db.transaction('rw', db.exerciseDefinitions, db.routines, db.settings, async () => {
+      if (await db.routines.count() === 0) {
+        const initial = makeInitialData()
+        await db.exerciseDefinitions.bulkPut(initial.exerciseDefinitions)
+        await db.routines.bulkPut(initial.routines)
+      }
       if (!(await db.settings.get('main'))) {
         await db.settings.put({ id: 'main', unit: 'kg', restTimerEnabled: true })
       }
+    })
+  }
+
+  async getExerciseDefinitions() { return db.exerciseDefinitions.orderBy('name').toArray() }
+  async saveExerciseDefinition(definition: ExerciseDefinition) {
+    validateDefinition(definition)
+    await db.exerciseDefinitions.put({ ...definition, name: normalizeExerciseText(definition.name),
+      equipment: normalizeExerciseText(definition.equipment), variation: normalizeExerciseText(definition.variation) })
+  }
+  async archiveExerciseDefinition(id: string, archived: boolean) {
+    if (!(await db.exerciseDefinitions.get(id))) throw new Error('找不到這個動作')
+    await db.exerciseDefinitions.update(id, { archived })
+  }
+  async mergeExerciseDefinitions(sourceId: string, targetId: string) {
+    if (sourceId === targetId) throw new Error('請選擇不同的目標動作')
+    return db.transaction('rw', db.exerciseDefinitions, db.routines, db.sessions, async () => {
+      const [source, target] = await Promise.all([db.exerciseDefinitions.get(sourceId), db.exerciseDefinitions.get(targetId)])
+      if (!source || !target) throw new Error('找不到要合併的動作')
+      const [routines, sessions] = await Promise.all([db.routines.toArray(), db.sessions.toArray()])
+      const affectedRoutines = routines.filter((routine) => routine.exercises.some((exercise) => exercise.exerciseDefinitionId === sourceId))
+      const affectedSessions = sessions.filter((session) => session.exercises.some((exercise) => exercise.exerciseDefinitionId === sourceId))
+      await db.routines.bulkPut(affectedRoutines.map((routine) => ({ ...routine, exercises: routine.exercises.map((exercise) =>
+        exercise.exerciseDefinitionId === sourceId ? { ...exercise, exerciseDefinitionId: targetId } : exercise) })))
+      await db.sessions.bulkPut(affectedSessions.map((session) => ({ ...session, exercises: session.exercises.map((exercise) =>
+        exercise.exerciseDefinitionId === sourceId ? { ...exercise, exerciseDefinitionId: targetId } : exercise) })))
+      await db.exerciseDefinitions.update(sourceId, { archived: true })
+      return { routines: affectedRoutines.length, sessions: affectedSessions.length }
     })
   }
 
@@ -77,21 +124,28 @@ export class IndexedDbWorkoutRepository implements WorkoutRepository {
   }
 
   async readAll(): Promise<WorkoutData> {
-    return db.transaction('r', db.routines, db.sessions, db.settings, async () => {
-      const [routines, sessions, settings] = await Promise.all([
-        this.getRoutines(), this.getSessions(), this.getSettings(),
+    return db.transaction('r', db.exerciseDefinitions, db.routines, db.sessions, db.settings, async () => {
+      const [exerciseDefinitions, routines, sessions, settings] = await Promise.all([
+        this.getExerciseDefinitions(), this.getRoutines(), this.getSessions(), this.getSettings(),
       ])
-      return { routines, sessions, settings }
+      return { exerciseDefinitions, routines, sessions, settings }
     })
   }
 
   async replaceAll(data: WorkoutData) {
     if (data.settings.id !== 'main') throw new Error('備份設定資料無效')
     if (data.sessions.filter((session) => session.status === 'active').length > 1) throw new MultipleActiveSessionsError()
-    await db.transaction('rw', db.routines, db.sessions, db.settings, async () => {
+    const ids = new Set(data.exerciseDefinitions.map((definition) => definition.id))
+    if (data.routines.some((routine) => routine.exercises.some((exercise) => !ids.has(exercise.exerciseDefinitionId))) ||
+      data.sessions.some((session) => session.exercises.some((exercise) => !ids.has(exercise.exerciseDefinitionId)))) {
+      throw new Error('備份中有找不到的動作定義')
+    }
+    await db.transaction('rw', db.exerciseDefinitions, db.routines, db.sessions, db.settings, async () => {
+      await db.exerciseDefinitions.clear()
       await db.routines.clear()
       await db.sessions.clear()
       await db.settings.clear()
+      await db.exerciseDefinitions.bulkPut(data.exerciseDefinitions)
       await db.routines.bulkPut(data.routines)
       await db.sessions.bulkPut(data.sessions)
       await db.settings.put(data.settings)
@@ -102,6 +156,9 @@ export class IndexedDbWorkoutRepository implements WorkoutRepository {
 export class IndexedDbWorkoutChanges implements WorkoutChangeSource {
   subscribe(onChange: Parameters<WorkoutChangeSource['subscribe']>[0], onError: (error: unknown) => void) {
     const subscriptions = [
+      liveQuery(() => db.exerciseDefinitions.orderBy('name').toArray()).subscribe({
+        next: (value) => onChange({ kind: 'exerciseDefinitions', value }), error: onError,
+      }),
       liveQuery(() => db.routines.orderBy('order').toArray()).subscribe({
         next: (value) => onChange({ kind: 'routines', value }), error: onError,
       }),

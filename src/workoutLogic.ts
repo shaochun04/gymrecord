@@ -52,6 +52,26 @@ export function calculateExercisePr(history: ReturnType<typeof findExerciseHisto
   return { weightPr, estimatedOneRepMaxPr, repsPrByWeight }
 }
 
+export function formatRir(rir: SetLog['rir']) {
+  return rir === null ? '' : `RIR ${rir === 4 ? '4+' : rir}`
+}
+
+export function getProgressionSuggestion(targetRepsMin: number | null, targetRepsMax: number | null, sets: SetLog[]) {
+  const none = { kind: 'none' as const, text: '' }
+  if (targetRepsMin === null || targetRepsMax === null || targetRepsMin < 1 || targetRepsMax < targetRepsMin) return none
+  const working = sets.filter((set) => set.done && set.kind === 'working')
+  if (working.length === 0 || working.some((set) => set.reps === null || set.reps <= 0)) return none
+  if (working.every((set) => set.reps! >= targetRepsMax)) {
+    return working.some((set) => set.rir === 0)
+      ? { kind: 'hold-limit' as const, text: '已達次數上限，但接近力竭，可先維持重量' }
+      : { kind: 'increase' as const, text: '已達目標次數上限，下次可考慮增加重量' }
+  }
+  if (working.some((set) => set.reps! < targetRepsMin)) {
+    return { kind: 'below-range' as const, text: '部分組數低於目標範圍，可先維持重量；若持續無法達標再考慮降低重量' }
+  }
+  return { kind: 'add-reps' as const, text: '維持目前重量，優先增加次數' }
+}
+
 export function nextRestEndAfterToggle(set: SetLog, enabled: boolean, restSeconds: number, now: number, currentEnd: number | null) {
   // Warmup and working sets currently use the same rule; change it here if needed.
   const startsRest = set.kind === 'working' || set.kind === 'warmup'

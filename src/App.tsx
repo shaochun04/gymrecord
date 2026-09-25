@@ -11,9 +11,10 @@ import type { WorkoutChangeSource } from './data/workoutChanges'
 import { ActiveSessionExistsError, type WorkoutRepository } from './data/workoutRepository'
 import type { AppSettings, Routine, RoutineExercise, SessionExercise, SetLog, WorkoutSession } from './types'
 import { createId } from './id'
+import { formatTargetRange, normalizeTargetRange } from './targetReps'
 import {
   adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
-  findExerciseHistory, findPreviousPerformance,
+  findExerciseHistory, findPreviousPerformance, formatRir, getProgressionSuggestion,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from './workoutLogic'
 import {
@@ -170,7 +171,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       restEndsAt: nextRestEndAfterToggle(set, settings.restTimerEnabled, exercise.restSeconds, Date.now(), current.restEndsAt),
       exercises: current.exercises.map((item) => item.id !== exercise.id ? item : {
         ...item,
-        sets: item.sets.map((row) => row.id === set.id ? { ...row, done } : row),
+        sets: item.sets.map((row) => row.id === set.id ? { ...row, done, rir: done ? row.rir : null } : row),
       }),
     }))
   }
@@ -190,7 +191,7 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
           sets: [...exercise.sets, {
             id: createId(), weight: last ? last.weight : source?.weight ?? null,
             reps: last ? last.reps : source?.reps ?? null,
-            done: false, kind: 'working' as const,
+            done: false, kind: 'working' as const, rir: null,
           }],
         }
       }),
@@ -212,9 +213,10 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
       exercises: [...current.exercises, {
         id: createId(), sourceExerciseId: exercise.id, name: exercise.name,
         equipment: exercise.equipment, note: exercise.note, restSeconds: exercise.restSeconds,
+        targetRepsMin: exercise.targetRepsMin, targetRepsMax: exercise.targetRepsMax,
         sets: Array.from({ length: exercise.sets }, () => ({
           id: createId(), weight: exercise.weight, reps: exercise.reps,
-          done: false, kind: 'working' as const,
+          done: false, kind: 'working' as const, rir: null,
         })),
       }],
     }))
@@ -224,7 +226,14 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   async function saveRoutine(routine: Routine) {
     if (!routine.name.trim()) { setToast('請輸入菜單名稱'); return }
     if (routine.exercises.some((exercise) => !exercise.name.trim())) { setToast('請填寫所有動作名稱'); return }
-    const next = { ...routine, name: routine.name.trim(), updatedAt: new Date().toISOString() }
+    let exercises: RoutineExercise[]
+    try {
+      exercises = routine.exercises.map((exercise) => ({ ...exercise, ...normalizeTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) }))
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '目標次數格式錯誤')
+      return
+    }
+    const next = { ...routine, exercises, name: routine.name.trim(), updatedAt: new Date().toISOString() }
     await repository.saveRoutine(next)
     setSelectedRoutineId(next.id)
     setEditingRoutine(null)
@@ -409,7 +418,7 @@ function RoutineScreen({ routine, unit, sessions, onBack, onStart, onEdit, onDel
         {routine.exercises.map((exercise, index) => <div className="exercise-list-item" key={exercise.id}>
           <span className="exercise-list-number">{String(index + 1).padStart(2, '0')}</span>
           <div className="exercise-list-main"><strong>{exercise.name}</strong><small>{exercise.equipment || '未設定器材'}{exercise.note && ` · ${exercise.note}`}</small></div>
-          <div className="exercise-list-target"><strong>{exercise.weight === null ? '—' : `${displayWeight(exercise.weight, unit)} ${unit}`}</strong><small>{exercise.reps ?? '—'} 下 × {exercise.sets} 組</small></div>
+          <div className="exercise-list-target"><strong>{exercise.weight === null ? '—' : `${displayWeight(exercise.weight, unit)} ${unit}`}</strong><small>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) || `${exercise.reps ?? '—'} 下`} × {exercise.sets} 組</small></div>
         </div>)}
         {routine.exercises.length === 0 && <div className="empty-inline">這份菜單還沒有動作。點右上角編輯開始加入。</div>}
       </div>
@@ -437,6 +446,7 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
 }) {
   const completed = completedSetCount(session)
   const planned = plannedSetCount(session)
+  const [openRirSetId, setOpenRirSetId] = useState<string | null>(null)
   return <main className="page workout-page">
     <div className="content-wrap">
       <header className="detail-topbar"><button className="icon-button" onClick={onBack} aria-label="返回首頁"><ArrowLeft size={22} /></button>
@@ -453,12 +463,13 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
         {session.exercises.map((exercise, exerciseIndex) => {
           const done = exercise.sets.filter((set) => set.done).length
           const previous = findPreviousPerformance(exercise, previousSessions, session.id, session.routineId)
+          const suggestion = previous ? getProgressionSuggestion(exercise.targetRepsMin, exercise.targetRepsMax, previous.sets) : null
           return <section className="workout-exercise-card" key={exercise.id}>
-            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}</p>{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
-            {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下</span>)}</div></div>}
+            <div className="workout-exercise-head"><span className="workout-exercise-index">{String(exerciseIndex + 1).padStart(2, '0')}</span><div><h2>{exercise.name}</h2><p>{exercise.equipment || '未設定器材'}</p>{formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax) && <small className="workout-target">目標 {formatTargetRange(exercise.targetRepsMin, exercise.targetRepsMax)}</small>}{exercise.note.trim() && <small className="workout-note">{exercise.note}</small>}</div><span className="set-count">{done}/{exercise.sets.length}</span></div>
+            {previous && <div className="previous-performance"><div className="previous-performance-heading"><RotateCcw size={14} /><strong>上次正式組</strong><span>{formatDate(previous.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</span></div><div className="previous-performance-sets">{previous.sets.map((set, index) => <span key={set.id}><small>{index + 1}</small>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'} 下{set.rir !== null && <em> · {formatRir(set.rir)}</em>}</span>)}</div>{suggestion && suggestion.kind !== 'none' && <p className="progression-suggestion"><strong>下次建議</strong>{suggestion.text}</p>}</div>}
             <div className="set-table-header"><span>組別</span><span>重量 <small>{unit}</small></span><span>次數</span><span>完成</span><span /></div>
-            <div className="set-table-body">{exercise.sets.map((set, index) => <div className={`set-row ${set.done ? 'is-done' : ''}`} key={set.id}>
-              <button className={`set-kind ${set.kind === 'warmup' ? 'is-warmup' : ''}`} title="點擊切換暖身／正式組" onClick={() => onUpdateSet(exercise.id, set.id, { kind: set.kind === 'warmup' ? 'working' : 'warmup' })}><b>{index + 1}</b><small>{set.kind === 'warmup' ? '暖身' : '正式'}</small></button>
+            <div className="set-table-body">{exercise.sets.map((set, index) => <div className="set-entry" key={set.id}><div className={`set-row ${set.done ? 'is-done' : ''}`}>
+              <button className={`set-kind ${set.kind === 'warmup' ? 'is-warmup' : ''}`} title="點擊切換暖身／正式組" onClick={() => { onUpdateSet(exercise.id, set.id, { kind: set.kind === 'warmup' ? 'working' : 'warmup', rir: null }); setOpenRirSetId(null) }}><b>{index + 1}</b><small>{set.kind === 'warmup' ? '暖身' : '正式'}</small></button>
               <NumberInput ariaLabel={`${exercise.name} 第 ${index + 1} 組重量`} quickLabel={`重量 ${unit}`} value={displayWeight(set.weight, unit)} placeholder="—" onChange={(value) => onUpdateSet(exercise.id, set.id, { weight: weightToKg(value, unit) })} onStep={(direction) => {
                 const kg = adjustWeightKg(set.weight, unit, direction)
                 onUpdateSet(exercise.id, set.id, { weight: kg })
@@ -469,9 +480,9 @@ function WorkoutScreen({ session, previousSessions, unit, onBack, onFinish, onDi
                 onUpdateSet(exercise.id, set.id, { reps })
                 return String(reps)
               }} />
-              <button className={`set-check ${set.done ? 'checked' : ''}`} onClick={() => onToggleSet(exercise, set)} aria-label={set.done ? '取消完成' : '完成這組'}><Check size={20} strokeWidth={3} /></button>
+              <button className={`set-check ${set.done ? 'checked' : ''}`} onClick={() => { onToggleSet(exercise, set); setOpenRirSetId(!set.done && set.kind === 'working' ? set.id : null) }} aria-label={set.done ? '取消完成' : '完成這組'}><Check size={20} strokeWidth={3} /></button>
               <button className="remove-set" onClick={() => onRemoveSet(exercise.id, set.id)} aria-label="刪除這組"><Trash2 size={14} /></button>
-            </div>)}</div>
+            </div>{set.done && set.kind === 'working' && <div className="rir-control"><button className="rir-toggle" onClick={() => setOpenRirSetId(openRirSetId === set.id ? null : set.id)} aria-expanded={openRirSetId === set.id}>{set.rir === null ? '填寫 RIR（可略過）' : formatRir(set.rir)}</button>{openRirSetId === set.id && <div className="rir-options" aria-label={`第 ${index + 1} 組 RIR`}><button onClick={() => { onUpdateSet(exercise.id, set.id, { rir: null }); setOpenRirSetId(null) }}>清除</button>{([0, 1, 2, 3, 4] as const).map((rir) => <button key={rir} className={set.rir === rir ? 'selected' : ''} onClick={() => { onUpdateSet(exercise.id, set.id, { rir }); setOpenRirSetId(null) }}>{rir === 4 ? '4+' : rir}</button>)}</div>}</div>}</div>)}</div>
             <button className="add-set-button" onClick={() => onAddSet(exercise.id)}><Plus size={16} /> 加一組</button>
           </section>
         })}
@@ -646,7 +657,7 @@ function ProgressScreen({ sessions, unit }: { sessions: WorkoutSession[], unit: 
         <div className="section-heading compact"><div><span className="eyebrow">FULL HISTORY</span><h2>動作歷史</h2></div><span className="count-chip">{exerciseHistory.length} 次</span></div>
         <div className="exercise-history">{exerciseHistory.map((entry) => <section className="exercise-history-card" key={entry.sessionId}>
           <div className="exercise-history-head"><strong>{formatDate(entry.date, { year: 'numeric', month: 'numeric', day: 'numeric' })}</strong><span>{entry.routineName}</span></div>
-          <div className="exercise-history-sets">{entry.sets.map((set, index) => <div className={set.kind === 'warmup' ? 'warmup' : ''} key={set.id}><small>{set.kind === 'warmup' ? '暖身' : `正式 ${index + 1}`}</small><strong>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'}</strong></div>)}</div>
+          <div className="exercise-history-sets">{entry.sets.map((set, index) => <div className={set.kind === 'warmup' ? 'warmup' : ''} key={set.id}><small>{set.kind === 'warmup' ? '暖身' : `正式 ${index + 1}`}</small><strong>{set.weight === null ? '—' : `${displayWeight(set.weight, unit)} ${unit}`} × {set.reps ?? '—'}{set.rir !== null && <em> · {formatRir(set.rir)}</em>}</strong></div>)}</div>
         </section>)}</div>
       </>}
     </>}
@@ -732,7 +743,7 @@ function HistoryDetail({ session, unit, onClose, onDelete }: {
         <p className="sheet-date">{formatDate(session.startedAt, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
         <div className="detail-stats"><div><Clock3 size={17} /><strong>{duration}</strong><span>訓練時間</span></div><div><CheckCircle2 size={17} /><strong>{completedSetCount(session)}</strong><span>完成組數</span></div><div><Dumbbell size={17} /><strong>{session.exercises.length}</strong><span>訓練動作</span></div></div>
         <div className="detail-exercise-list">{session.exercises.map((exercise, index) => <section key={exercise.id} className="detail-exercise"><div className="detail-exercise-title"><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{exercise.name}</h3><small>{exercise.equipment || '未設定器材'}{exercise.note.trim() && ` · ${exercise.note}`}</small></div></div>
-          <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
+          <div className="detail-set-list">{exercise.sets.map((set, setIndex) => <div key={set.id} className={set.done ? '' : 'muted'}><span>{set.kind === 'warmup' ? '暖身' : `第 ${setIndex + 1} 組`}</span><strong>{set.weight === null ? '—' : displayWeight(set.weight, unit)} {unit} <small>×</small> {set.reps ?? '—'} 下{set.rir !== null && ` · ${formatRir(set.rir)}`}</strong>{set.done ? <Check size={16} /> : <Minus size={16} />}</div>)}</div>
         </section>)}</div>
         <button className="quiet-delete" onClick={onDelete}><Trash2 size={15} /> 刪除這筆紀錄</button>
       </div>
@@ -759,7 +770,8 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
   }
   function addExercise() {
     setDraft((current) => ({ ...current, exercises: [...current.exercises, {
-      id: createId(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
+      id: createId(), name: '', equipment: '', weight: null, reps: 10,
+      targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '',
     }] }))
   }
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -773,7 +785,8 @@ function RoutineEditor({ routine, unit, onClose, onSave }: {
           <div className="editor-exercise-top"><span className="editor-index">{String(index + 1).padStart(2, '0')}</span><input aria-label="動作名稱" value={exercise.name} placeholder="動作名稱" onChange={(event) => patchExercise(exercise.id, { name: event.target.value })} /><button onClick={() => moveExercise(index, -1)} disabled={index === 0} aria-label="上移動作">↑</button><button onClick={() => moveExercise(index, 1)} disabled={index === draft.exercises.length - 1} aria-label="下移動作">↓</button><button onClick={() => setDraft({ ...draft, exercises: draft.exercises.filter((item) => item.id !== exercise.id) })} aria-label="刪除動作"><Trash2 size={16} /></button></div>
           <div className="editor-exercise-grid"><label className="form-field wide"><span>器材／變化</span><input value={exercise.equipment} placeholder="例如 槓鈴、Cable" onChange={(event) => patchExercise(exercise.id, { equipment: event.target.value })} /></label>
             <label className="form-field"><span>重量 {unit}</span><NumberInput value={displayWeight(exercise.weight, unit)} onChange={(value) => patchExercise(exercise.id, { weight: weightToKg(value, unit) })} placeholder="—" ariaLabel="預設重量" /></label>
-            <label className="form-field"><span>次數</span><NumberInput value={exercise.reps === null ? '' : String(exercise.reps)} onChange={(value) => patchExercise(exercise.id, { reps: value })} placeholder="—" ariaLabel="預設次數" integer /></label>
+            <label className="form-field"><span>預設次數</span><NumberInput value={exercise.reps === null ? '' : String(exercise.reps)} onChange={(value) => patchExercise(exercise.id, { reps: value })} placeholder="—" ariaLabel="預設次數" integer /></label>
+            <div className="form-field wide"><span>目標次數</span><div className="target-range-input"><NumberInput value={exercise.targetRepsMin === null ? '' : String(exercise.targetRepsMin)} onChange={(value) => patchExercise(exercise.id, { targetRepsMin: value })} placeholder="下限" ariaLabel="目標次數下限" integer /><span>～</span><NumberInput value={exercise.targetRepsMax === null ? '' : String(exercise.targetRepsMax)} onChange={(value) => patchExercise(exercise.id, { targetRepsMax: value })} placeholder="上限" ariaLabel="目標次數上限" integer /></div></div>
             <label className="form-field"><span>組數</span><NumberInput value={String(exercise.sets)} onChange={(value) => patchExercise(exercise.id, { sets: Math.max(1, value ?? 1) })} placeholder="3" ariaLabel="預設組數" integer /></label>
             <label className="form-field"><span>休息 秒</span><NumberInput value={String(exercise.restSeconds)} onChange={(value) => patchExercise(exercise.id, { restSeconds: Math.max(0, value ?? 0) })} placeholder="90" ariaLabel="休息秒數" integer /></label>
             <label className="form-field full"><span>備註</span><input value={exercise.note} placeholder="例如 座椅高度、握法" onChange={(event) => patchExercise(exercise.id, { note: event.target.value })} /></label>
@@ -792,7 +805,8 @@ function AddExerciseModal({ unit, onClose, onAdd }: {
   onAdd: (exercise: RoutineExercise) => void
 }) {
   const [exercise, setExercise] = useState<RoutineExercise>({
-    id: createId(), name: '', equipment: '', weight: null, reps: 10, sets: 3, restSeconds: 90, note: '',
+    id: createId(), name: '', equipment: '', weight: null, reps: 10,
+    targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '',
   })
   const patch = (value: Partial<RoutineExercise>) => setExercise((current) => ({ ...current, ...value }))
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>

@@ -2,17 +2,19 @@ import { describe, expect, it } from 'vitest'
 import type { Routine, SessionExercise, SetLog, WorkoutSession } from '../src/types'
 import { makeSession } from '../src/data/session'
 import { displayWeight } from '../src/utils'
+import { normalizeTargetRange, formatTargetRange } from '../src/targetReps'
+import { serializeCsv } from '../src/data/backup'
 import {
   adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
-  findExerciseHistory, findPreviousPerformance,
+  findExerciseHistory, findPreviousPerformance, getProgressionSuggestion,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from '../src/workoutLogic'
 
 const set = (id: string, weight: number | null, reps: number | null, done = true, kind: SetLog['kind'] = 'working'): SetLog =>
-  ({ id, weight, reps, done, kind })
+  ({ id, weight, reps, rir: null, done, kind })
 
 const exercise = (id: string, sourceExerciseId: string, sets: SetLog[], name = '啞鈴臥推', equipment = '啞鈴'): SessionExercise =>
-  ({ id, sourceExerciseId, name, equipment, note: '椅背 30°', restSeconds: 90, sets })
+  ({ id, sourceExerciseId, name, equipment, note: '椅背 30°', restSeconds: 90, targetRepsMin: null, targetRepsMax: null, sets })
 
 const session = (id: string, startedAt: string, exercises: SessionExercise[], status: WorkoutSession['status'] = 'completed'): WorkoutSession =>
   ({ id, routineId: id, routineName: id, startedAt, endedAt: status === 'completed' ? startedAt : null, status, restEndsAt: null, exercises })
@@ -51,7 +53,7 @@ describe('上次訓練紀錄', () => {
 describe('跨菜單預填與完整動作歷史', () => {
   const routine: Routine = {
     id: 'push', name: 'Push', label: '', accent: '#fff', order: 0, updatedAt: '2026-09-01T00:00:00Z',
-    exercises: [{ id: 'push-press', name: '啞鈴臥推', equipment: '啞鈴', weight: 15, reps: 8, sets: 4, restSeconds: 90, note: '椅背 30°' }],
+    exercises: [{ id: 'push-press', name: '啞鈴臥推', equipment: '啞鈴', weight: 15, reps: 8, targetRepsMin: 8, targetRepsMax: 12, sets: 4, restSeconds: 90, note: '椅背 30°' }],
   }
   const oldPush = session('push', '2026-09-20T10:00:00Z', [exercise('old-push', 'push-press', [set('old', 20, 10)])])
   const newUpper = session('upper', '2026-09-25T10:00:00Z', [exercise('new-upper', 'upper-press', [
@@ -64,6 +66,8 @@ describe('跨菜單預填與完整動作歷史', () => {
       [22, 10], [22, 10], [20, 12], [20, 12],
     ])
     expect(started.exercises[0].note).toBe('椅背 30°')
+    expect([started.exercises[0].targetRepsMin, started.exercises[0].targetRepsMax]).toEqual([8, 12])
+    expect(started.exercises[0].sets.every((row) => row.rir === null)).toBe(true)
     expect(findPreviousPerformance(started.exercises[0], [oldPush, newUpper], started.id, routine.id)?.sets.map((row) => row.id)).toEqual(['a', 'b', 'c'])
   })
 
@@ -93,6 +97,49 @@ describe('跨菜單預填與完整動作歷史', () => {
   })
 })
 
+describe('目標次數與 RIR', () => {
+  it('目標次數允許留白，單側輸入補成相同值，拒絕無效範圍', () => {
+    expect(normalizeTargetRange(null, null)).toEqual({ targetRepsMin: null, targetRepsMax: null })
+    expect(normalizeTargetRange(10, null)).toEqual({ targetRepsMin: 10, targetRepsMax: 10 })
+    expect(normalizeTargetRange(null, 12)).toEqual({ targetRepsMin: 12, targetRepsMax: 12 })
+    expect(() => normalizeTargetRange(12, 8)).toThrow()
+    expect(() => normalizeTargetRange(0, 10)).toThrow()
+    expect(() => normalizeTargetRange(8.5, 12)).toThrow()
+    expect(formatTargetRange(8, 12)).toBe('8～12 下')
+    expect(formatTargetRange(10, 10)).toBe('10 下')
+  })
+
+  it('Session 保留目標 snapshot，且不複製上一場 RIR', () => {
+    const routine: Routine = { id: 'r', name: 'Push', label: '', accent: '#fff', order: 0, updatedAt: '2026-09-01T00:00:00Z',
+      exercises: [{ id: 'press', name: '臥推', equipment: '槓鈴', weight: 20, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 1, restSeconds: 90, note: '' }] }
+    const past = session('past', '2026-09-20T10:00:00Z', [exercise('old', 'press', [{ ...set('s', 22, 10), rir: 2 }], '臥推', '槓鈴')])
+    const started = makeSession(routine, [past])
+    routine.exercises[0].targetRepsMin = 6
+    expect(started.exercises[0].targetRepsMin).toBe(8)
+    expect(started.exercises[0].sets[0]).toMatchObject({ weight: 22, reps: 10, rir: null })
+    expect(findExerciseHistory(started.exercises[0], [past], routine.id)[0].sets[0].rir).toBe(2)
+  })
+
+  it('Double Progression 涵蓋上限、力竭、區間、低於下限與無資料', () => {
+    const rows = [set('a', 20, 12), set('b', 20, 12)]
+    expect(getProgressionSuggestion(8, 12, rows).kind).toBe('increase')
+    expect(getProgressionSuggestion(8, 12, [{ ...rows[0], rir: 0 }, rows[1]]).kind).toBe('hold-limit')
+    expect(getProgressionSuggestion(8, 12, [set('a', 20, 10), set('b', 20, 8)]).kind).toBe('add-reps')
+    expect(getProgressionSuggestion(8, 12, [set('a', 20, 8), set('b', 20, 7)]).kind).toBe('below-range')
+    expect(getProgressionSuggestion(null, null, rows).kind).toBe('none')
+    expect(getProgressionSuggestion(8, 12, [set('a', 20, 12, false)]).kind).toBe('none')
+  })
+
+  it('CSV 保留原欄位並輸出 RIR 與目標範圍，舊歷史留白', () => {
+    const current = session('new', '2026-09-25T10:00:00Z', [{ ...exercise('e', 'press', [{ ...set('s', 20, 10), rir: 4 }]), targetRepsMin: 8, targetRepsMax: 12 }])
+    const old = session('old', '2026-09-20T10:00:00Z', [exercise('e2', 'press', [set('s2', 18, 10)])])
+    const csv = serializeCsv([current, old])
+    expect(csv).toContain('"已完成","RIR","目標次數下限","目標次數上限"')
+    expect(csv).toContain('"20","10","是","4","8","12"')
+    expect(csv).toContain('"18","10","是","","",""')
+  })
+})
+
 describe('即時計算 PR', () => {
   it('只計完成的正式有效組，依重量、同重量次數及 Epley 估算 1RM', () => {
     const current = exercise('current', 'source-1', [])
@@ -108,6 +155,9 @@ describe('即時計算 PR', () => {
     expect(prs.estimatedOneRepMaxPr?.estimateKg).toBeCloseTo(20 * (1 + 13 / 30))
     expect(displayWeight(prs.weightPr!.weight, 'lb')).toBe('48.5')
     expect(prs.weightPr?.weight).toBe(22)
+    const withRir = history.map((entry) => ({ ...entry, sets: entry.sets.map((row) => ({ ...row, rir: 0 as const })) }))
+    expect(calculateExercisePr(withRir).weightPr?.id).toBe(prs.weightPr?.id)
+    expect(calculateExercisePr(withRir).estimatedOneRepMaxPr?.estimateKg).toBe(prs.estimatedOneRepMaxPr?.estimateKg)
   })
 })
 

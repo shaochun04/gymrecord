@@ -9,7 +9,7 @@ function exercise(
   sets = 3,
   restSeconds = 90,
 ): RoutineExercise {
-  return { id: createId(), name, equipment, weight, reps, sets, restSeconds, note: '' }
+  return { id: createId(), name, equipment, weight, reps, targetRepsMin: reps, targetRepsMax: reps, sets, restSeconds, note: '' }
 }
 
 export function makeInitialRoutines(): Routine[] {

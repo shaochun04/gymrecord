@@ -6,6 +6,8 @@ export type RoutineExercise = {
   equipment: string
   weight: number | null
   reps: number | null
+  targetRepsMin: number | null
+  targetRepsMax: number | null
   sets: number
   restSeconds: number
   note: string
@@ -25,6 +27,7 @@ export type SetLog = {
   id: string
   weight: number | null
   reps: number | null
+  rir: 0 | 1 | 2 | 3 | 4 | null
   done: boolean
   kind: 'working' | 'warmup'
 }
@@ -36,6 +39,8 @@ export type SessionExercise = {
   equipment: string
   note: string
   restSeconds: number
+  targetRepsMin: number | null
+  targetRepsMax: number | null
   sets: SetLog[]
 }
 

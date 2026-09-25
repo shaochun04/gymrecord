@@ -3,6 +3,7 @@ import { makeInitialRoutines } from '../seed'
 import type { AppSettings, Routine, WorkoutSession } from '../types'
 import type { WorkoutChangeSource } from './workoutChanges'
 import { ActiveSessionExistsError, MultipleActiveSessionsError, type WorkoutData, type WorkoutRepository } from './workoutRepository'
+import { migrateRoutineV1, migrateSessionV1, type RoutineV1, type WorkoutSessionV1 } from './modelMigration'
 
 const db = new Dexie('gymrecord') as Dexie & {
   routines: EntityTable<Routine, 'id'>
@@ -14,6 +15,19 @@ db.version(1).stores({
   routines: 'id, order, name',
   sessions: 'id, status, startedAt, routineId',
   settings: 'id',
+})
+
+db.version(2).stores({
+  routines: 'id, order, name',
+  sessions: 'id, status, startedAt, routineId',
+  settings: 'id',
+}).upgrade(async (transaction) => {
+  await transaction.table('routines').toCollection().modify((routine: RoutineV1) => {
+    Object.assign(routine, migrateRoutineV1(routine))
+  })
+  await transaction.table('sessions').toCollection().modify((session: WorkoutSessionV1) => {
+    Object.assign(session, migrateSessionV1(session))
+  })
 })
 
 export class IndexedDbWorkoutRepository implements WorkoutRepository {

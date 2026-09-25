@@ -22,12 +22,15 @@ export function makeSession(routine: Routine, sessions: WorkoutSession[] = []): 
         equipment: exercise.equipment,
         note: exercise.note,
         restSeconds: exercise.restSeconds,
+        targetRepsMin: exercise.targetRepsMin,
+        targetRepsMax: exercise.targetRepsMax,
         sets: Array.from({ length: exercise.sets }, (_, index) => {
           const previous = previousSets[index] ?? previousSets.at(-1)
           return {
             id: createId(),
             weight: previous ? previous.weight : exercise.weight,
             reps: previous ? previous.reps : exercise.reps,
+            rir: null,
             done: false,
             kind: 'working' as const,
           }

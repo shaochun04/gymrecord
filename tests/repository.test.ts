@@ -11,6 +11,9 @@ const routine: WorkoutData['routines'][number] = {
   id: 'push', name: 'Push day', label: '胸', accent: '#abc', order: 0,
   updatedAt: '2026-09-20T10:00:00.000Z', exercises: [],
 }
+const legacyRoutine = { ...routine, exercises: [{ id: 'bench', name: '臥推', equipment: '槓鈴', weight: 30, reps: 10, sets: 3, restSeconds: 90, note: '' }] }
+const legacyExercise = { id: 'exercise-1', sourceExerciseId: 'bench', name: '臥推', equipment: '槓鈴', note: '', restSeconds: 90,
+  sets: [{ id: 'set-1', weight: 30, reps: 10, done: true, kind: 'working' }] }
 function active(id: string): WorkoutData['sessions'][number] {
   return { id, routineId: 'push', routineName: 'Push day', startedAt: '2026-09-21T10:00:00.000Z',
     endedAt: null, status: 'active', restEndsAt: null, exercises: [] }
@@ -22,15 +25,26 @@ beforeAll(async () => {
   // Create the original v1 database directly, then open it through the new adapter.
   const legacy = new Dexie('gymrecord')
   legacy.version(1).stores({ routines: 'id, order, name', sessions: 'id, status, startedAt, routineId', settings: 'id' })
-  await legacy.table('routines').put(routine)
+  await legacy.table('routines').put(legacyRoutine)
+  await legacy.table('sessions').bulkPut([
+    { ...active('legacy-completed'), status: 'completed', endedAt: '2026-09-21T11:00:00.000Z', exercises: [legacyExercise] },
+    { ...active('legacy-active'), exercises: [legacyExercise] },
+  ])
   await legacy.table('settings').put(settings)
   legacy.close()
   await repository.initialize()
 })
 
 describe('IndexedDB repository', () => {
-  it('reads records from the original database without a schema migration', async () => {
-    expect(await repository.getRoutines()).toEqual([routine])
+  it('migrates v1 routines and completed/active sessions to v2 without losing IDs', async () => {
+    expect(await repository.getRoutines()).toEqual([{ ...legacyRoutine, exercises: [{ ...legacyRoutine.exercises[0], targetRepsMin: 10, targetRepsMax: 10 }] }])
+    const sessions = await repository.getSessions()
+    expect(sessions.map((session) => session.id).sort()).toEqual(['legacy-active', 'legacy-completed'])
+    expect(sessions.map((session) => session.status).sort()).toEqual(['active', 'completed'])
+    for (const session of sessions) {
+      expect(session.exercises[0]).toMatchObject({ id: 'exercise-1', targetRepsMin: null, targetRepsMax: null })
+      expect(session.exercises[0].sets[0]).toMatchObject({ id: 'set-1', rir: null })
+    }
     expect(await repository.getSettings()).toEqual(settings)
   })
 
@@ -49,7 +63,7 @@ describe('IndexedDB repository', () => {
 
     it('detects an already corrupted database instead of choosing the first active session', async () => {
       const legacy = new Dexie('gymrecord')
-      legacy.version(1).stores({ routines: 'id, order, name', sessions: 'id, status, startedAt, routineId', settings: 'id' })
+      legacy.version(2).stores({ routines: 'id, order, name', sessions: 'id, status, startedAt, routineId', settings: 'id' })
       await legacy.table('sessions').bulkPut([active('a'), active('b')])
       legacy.close()
       await expect(repository.getActiveSession()).rejects.toBeInstanceOf(MultipleActiveSessionsError)
@@ -72,7 +86,7 @@ describe('IndexedDB repository', () => {
       expect(await repository.readAll()).toEqual(before)
     })
 
-    it('round trips a v1 JSON backup through the real repository', async () => {
+    it('round trips a v2 JSON backup through the real repository', async () => {
       await repository.saveSession({ ...active('saved'), status: 'completed', endedAt: '2026-09-21T11:00:00.000Z' })
       const before = await repository.readAll()
       const file = new File([stringifyBackup(before)], 'gymrecord-backup.json', { type: 'application/json' })

@@ -39,6 +39,24 @@ export function findPreviousPerformance(identity: ExerciseIdentity, sessions: Wo
   return previous ? { date: previous.date, sets: previous.sets.filter((set) => set.kind === 'working') } : null
 }
 
+export function changeExerciseVariant(exercise: SessionExercise, equipment: string, variation: string,
+  sessions: WorkoutSession[], currentSessionId: string): SessionExercise {
+  if (!canChangeExerciseIdentity(exercise)) return exercise
+  const next = { ...exercise, equipment: normalizeExerciseText(equipment), variation: normalizeExerciseText(variation) }
+  // Repeated selector/blur events must not overwrite values entered for the same variant.
+  if (sameExerciseIdentity(exercise, next)) return exercise
+  const previous = findPreviousPerformance(next, sessions, currentSessionId)
+  if (!previous) return next
+
+  let workingIndex = 0
+  return { ...next, sets: exercise.sets.map((set) => {
+    if (set.kind !== 'working' || set.done) return set
+    const prior = previous.sets[workingIndex++] ?? previous.sets.at(-1)!
+    // Only prefill weight/reps; preserve the current set's RIR and other fields.
+    return { ...set, weight: prior.weight, reps: prior.reps }
+  }) }
+}
+
 export function calculateExercisePr(history: ReturnType<typeof findExerciseHistory>) {
   const eligible = history.flatMap((entry) => entry.sets.filter((set) =>
     set.kind === 'working' && set.weight !== null && set.weight > 0 && set.reps !== null && set.reps > 0,

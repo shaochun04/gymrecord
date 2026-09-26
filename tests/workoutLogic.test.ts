@@ -5,7 +5,7 @@ import { serializeCsv } from '../src/data/backup'
 import { displayWeight } from '../src/utils'
 import { formatTargetRange, normalizeTargetRange } from '../src/targetReps'
 import {
-  adjustReps, adjustWeightKg, calculateExercisePr, completedWorkingVolumeKg, durationMinutes,
+  adjustReps, adjustWeightKg, calculateExercisePr, changeExerciseVariant, completedWorkingVolumeKg, durationMinutes,
   findExerciseHistory, findPreviousPerformance, getProgressionSuggestion,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from '../src/workoutLogic'
@@ -78,6 +78,88 @@ describe('global exercise identity and history', () => {
     const withRir = history.map((entry) => ({ ...entry, sets: entry.sets.map((row) => ({ ...row, rir: 0 as const })) }))
     expect(calculateExercisePr(withRir).weightPr?.id).toBe(before.weightPr?.id)
     expect(calculateExercisePr(withRir).estimatedOneRepMaxPr?.estimateKg).toBe(before.estimatedOneRepMaxPr?.estimateKg)
+  })
+})
+
+describe('Workout variant changes and prefill', () => {
+  const dumbbell = session('upper', '2026-09-25T10:00:00Z', [exercise('db', bench.id, [
+    set('warm', 5, 15, true, 'warmup'), set('db1', 22, 12, true, 'working', 2),
+    set('undone', 99, 1, false), set('db2', 20, 10, true, 'working', 3),
+  ])])
+  const barbell = session('barbell', '2026-09-24T10:00:00Z', [exercise('bar', bench.id, [
+    set('bar1', 60, 8, true, 'working', 1), set('bar2', 55, 7, true, 'working', 0),
+  ], '臥推', '槓鈴')])
+  const history = [barbell, dumbbell]
+  const pending = () => exercise('current', bench.id, [set('a', 15, 5, false), set('b', 16, 6, false), set('c', 17, 7, false)])
+  const values = (item: SessionExercise) => item.sets.map((row) => [row.weight, row.reps])
+
+  it('prefills dumbbell history when equipment is selected after starting with no default', () => {
+    const routine: Routine = { id: 'push', name: 'Push', label: '', accent: '#fff', order: 0, updatedAt: '2026-09-26T00:00:00Z',
+      exercises: [{ id: 'slot', exerciseDefinitionId: bench.id, defaultEquipment: null, defaultVariation: '平板',
+        weight: 15, reps: 5, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '' }] }
+    const current = makeSession(routine, [bench], history)
+    expect(current.exercises[0].equipment).toBe('')
+    expect(values(current.exercises[0])).toEqual([[15, 5], [15, 5], [15, 5]])
+    const changed = changeExerciseVariant(current.exercises[0], ' 啞鈴 ', '平板', history, current.id)
+    expect(changed.equipment).toBe('啞鈴')
+    expect(values(changed)).toEqual([[22, 12], [20, 10], [20, 10]])
+    expect(values(current.exercises[0])).toEqual([[15, 5], [15, 5], [15, 5]])
+  })
+
+  it('replaces dumbbell inputs with barbell history and updates previous/progression', () => {
+    const changed = changeExerciseVariant(pending(), '槓鈴', '平板', history, 'active')
+    expect(values(changed)).toEqual([[60, 8], [55, 7], [55, 7]])
+    const previous = findPreviousPerformance(changed, history, 'active')!
+    expect(previous.sets.map((row) => row.id)).toEqual(['bar1', 'bar2'])
+    expect(getProgressionSuggestion(changed.targetRepsMin, changed.targetRepsMax, previous.sets).kind).toBe('below-range')
+  })
+
+  it('retains current inputs when the new barbell variant has no completed history', () => {
+    const activeBarbell = { ...barbell, status: 'active' as const, endedAt: null }
+    const original = pending()
+    const changed = changeExerciseVariant(original, '槓鈴', '平板', [dumbbell, activeBarbell], 'active')
+    expect(changed.equipment).toBe('槓鈴')
+    expect(changed.sets).toBe(original.sets)
+    expect(findPreviousPerformance(changed, [dumbbell, activeBarbell])).toBeNull()
+  })
+
+  it('does not copy history RIR or completion state', () => {
+    const original = pending()
+    original.sets[1].rir = 4
+    const changed = changeExerciseVariant(original, '槓鈴', '平板', history, 'active')
+    expect(changed.sets.map((row) => row.rir)).toEqual([null, 4, null])
+    expect(changed.sets.map((row) => row.done)).toEqual([false, false, false])
+    expect(changed.sets.map((row) => row.id)).toEqual(original.sets.map((row) => row.id))
+  })
+
+  it('preserves both completed and pending warmups without shifting working-set correspondence', () => {
+    const original = pending()
+    const doneWarmup = set('done-warm', 7, 15, true, 'warmup', 3)
+    const pendingWarmup = set('pending-warm', 8, 14, false, 'warmup')
+    original.sets = [doneWarmup, original.sets[0], pendingWarmup, original.sets[1], original.sets[2]]
+    const changed = changeExerciseVariant(original, '槓鈴', '平板', history, 'active')
+    expect(changed.sets[0]).toBe(doneWarmup)
+    expect(changed.sets[2]).toBe(pendingWarmup)
+    expect(values(changed)).toEqual([[7, 15], [60, 8], [8, 14], [55, 7], [55, 7]])
+  })
+
+  it('rejects variant changes after any working set is complete', () => {
+    const original = pending()
+    original.sets[1].done = true
+    expect(changeExerciseVariant(original, '槓鈴', '上斜', history, 'active')).toBe(original)
+  })
+
+  it('uses the new variation rather than the same equipment with a different variation', () => {
+    const incline = session('incline', '2026-09-23T10:00:00Z', [exercise('incline', bench.id,
+      [set('incline1', 18, 12)], '臥推', '啞鈴', '上斜')])
+    const changed = changeExerciseVariant(pending(), '啞鈴', '上斜', [...history, incline], 'active')
+    expect(values(changed)).toEqual([[18, 12], [18, 12], [18, 12]])
+    expect(findPreviousPerformance(changed, [...history, incline])?.date).toBe(incline.startedAt)
+  })
+
+  it('does not reapply prefill on blur or repeated events for the same normalized identity', () => {
+    const original = pending()
+    expect(changeExerciseVariant(original, ' 啞鈴 ', ' 平板 ', history, 'active')).toBe(original)
   })
 })
 

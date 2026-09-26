@@ -19,7 +19,7 @@ import { formatTargetRange, normalizeTargetRange } from './targetReps'
 import { initialScreenForActiveSession, makeAppHistoryState, readAppHistoryState } from './navigation'
 import { ActiveSessionLease } from './sessionLease'
 import {
-  adjustReps, adjustWeightKg, calculateExercisePr, canChangeExerciseIdentity, completedWorkingVolumeKg, durationMinutes,
+  adjustReps, adjustWeightKg, calculateExercisePr, canChangeExerciseIdentity, changeExerciseVariant, completedWorkingVolumeKg, durationMinutes,
   exerciseIdentityKey, findExerciseHistory, findPreviousPerformance, formatRir, getProgressionSuggestion,
   formatDuration, nextRestEndAfterToggle, remainingRestSeconds, shiftRestEnd,
 } from './workoutLogic'
@@ -304,9 +304,9 @@ export default function App({ repository, changes }: { repository: WorkoutReposi
   }
 
   function updateExerciseIdentity(exerciseId: string, equipment: string, variation: string) {
-    updateSession((current) => ({ ...current, exercises: current.exercises.map((exercise) =>
-      exercise.id !== exerciseId ? exercise : { ...exercise,
-        equipment: normalizeExerciseText(equipment), variation: normalizeExerciseText(variation) }) }))
+    updateSession((current) => current.status !== 'active' ? current : ({ ...current,
+      exercises: current.exercises.map((exercise) => exercise.id !== exerciseId ? exercise :
+        changeExerciseVariant(exercise, equipment, variation, completed, current.id)) }))
   }
 
   function addWorkoutExercise(definition: ExerciseDefinition, exercise: RoutineExercise) {

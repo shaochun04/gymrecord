@@ -1,6 +1,7 @@
 import type { ExerciseDefinition, Routine, WorkoutSession } from '../types'
 import { createId } from '../id'
 import { findPreviousPerformance } from '../workoutLogic'
+import { normalizeExerciseText } from '../exerciseDefinitions'
 
 export function makeSession(routine: Routine, definitions: ExerciseDefinition[], sessions: WorkoutSession[] = []): WorkoutSession {
   return {
@@ -14,14 +15,16 @@ export function makeSession(routine: Routine, definitions: ExerciseDefinition[],
     exercises: routine.exercises.map((exercise) => {
       const definition = definitions.find((item) => item.id === exercise.exerciseDefinitionId)
       if (!definition) throw new Error('菜單引用的動作定義不存在')
-      const previousSets = findPreviousPerformance(definition.id, sessions)?.sets ?? []
+      const equipment = normalizeExerciseText(exercise.defaultEquipment ?? '')
+      const variation = normalizeExerciseText(exercise.defaultVariation ?? '')
+      const previousSets = findPreviousPerformance({ exerciseDefinitionId: definition.id, equipment, variation }, sessions)?.sets ?? []
       return {
         id: createId(),
         sourceExerciseId: exercise.id,
         exerciseDefinitionId: definition.id,
         name: definition.name,
-        equipment: definition.equipment,
-        variation: definition.variation,
+        equipment,
+        variation,
         note: exercise.note,
         restSeconds: exercise.restSeconds,
         targetRepsMin: exercise.targetRepsMin,

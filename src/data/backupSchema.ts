@@ -1,8 +1,11 @@
-import { MUSCLE_GROUPS, type AppSettings, type ExerciseDefinition, type Routine, type RoutineExercise, type SessionExercise, type SetLog, type WorkoutSession } from '../types'
+import { MUSCLE_GROUPS, type AppSettings, type ExerciseDefinition, type Routine, type RoutineExercise, type SetLog, type WorkoutSession } from '../types'
 import { MultipleActiveSessionsError, type WorkoutData } from './workoutRepository'
-import { migrateRoutineV1, migrateSessionV1, migrateWorkoutDataV2, type RoutineExerciseV1, type RoutineExerciseV2, type RoutineV1, type RoutineV2, type SessionExerciseV1, type SessionExerciseV2, type SetLogV1, type WorkoutSessionV1, type WorkoutSessionV2 } from './modelMigration'
+import { migrateRoutineV1, migrateSessionV1, migrateWorkoutDataV2, migrateWorkoutDataV3,
+  type ExerciseDefinitionV3, type RoutineExerciseV1, type RoutineExerciseV2, type RoutineExerciseV3,
+  type RoutineV1, type RoutineV2, type RoutineV3, type SessionExerciseV1, type SessionExerciseV2, type SessionExerciseV3,
+  type SetLogV1, type WorkoutSessionV1, type WorkoutSessionV2, type WorkoutSessionV3 } from './modelMigration'
 
-export const CURRENT_BACKUP_VERSION = 3
+export const CURRENT_BACKUP_VERSION = 4
 const BACKUP_FORMAT = 'gymrecord-backup'
 
 type BackupV1 = {
@@ -27,6 +30,16 @@ type BackupV3 = {
   format: typeof BACKUP_FORMAT
   version: 3
   exportedAt?: string
+  exerciseDefinitions: ExerciseDefinitionV3[]
+  routines: RoutineV3[]
+  sessions: WorkoutSessionV3[]
+  settings: AppSettings[]
+}
+
+type BackupV4 = {
+  format: typeof BACKUP_FORMAT
+  version: 4
+  exportedAt?: string
   exerciseDefinitions: ExerciseDefinition[]
   routines: Routine[]
   sessions: WorkoutSession[]
@@ -36,7 +49,7 @@ type BackupV3 = {
 type Migration = (value: unknown) => unknown
 
 // Each migration must validate the version it reads and return the next version.
-const migrations: Partial<Record<number, Migration>> = { 1: migrateV1ToV2, 2: migrateV2ToV3 }
+const migrations: Partial<Record<number, Migration>> = { 1: migrateV1ToV2, 2: migrateV2ToV3, 3: migrateV3ToV4 }
 
 export function migrateV1ToV2(value: unknown): BackupV2 {
   if (!isBackupV1(value)) throw new Error('備份內容不完整或資料格式錯誤')
@@ -52,6 +65,13 @@ export function migrateV2ToV3(value: unknown): BackupV3 {
   if (!isBackupV2(value)) throw new Error('備份內容不完整或資料格式錯誤')
   const migrated = migrateWorkoutDataV2({ routines: value.routines, sessions: value.sessions })
   return { format: BACKUP_FORMAT, version: 3, exportedAt: value.exportedAt,
+    ...migrated, settings: value.settings }
+}
+
+export function migrateV3ToV4(value: unknown): BackupV4 {
+  if (!isBackupV3(value)) throw new Error('備份內容不完整或資料格式錯誤')
+  const migrated = migrateWorkoutDataV3(value)
+  return { format: BACKUP_FORMAT, version: 4, exportedAt: value.exportedAt,
     ...migrated, settings: value.settings }
 }
 
@@ -76,15 +96,36 @@ export function parseBackupText(text: string): WorkoutData {
     }
   }
 
-  if (!isBackupV3(current)) throw new Error('備份內容不完整或資料格式錯誤')
+  if (!isBackupV4(current)) throw new Error('備份內容不完整或資料格式錯誤')
   if (current.sessions.filter((session) => session.status === 'active').length > 1) {
     throw new MultipleActiveSessionsError()
   }
   return { exerciseDefinitions: current.exerciseDefinitions, routines: current.routines, sessions: current.sessions, settings: current.settings[0] }
 }
 
+export type BackupPreview = {
+  exportedAt: string | null
+  sourceVersion: number
+  sessions: number
+  routines: number
+  exercises: number
+}
+
+export function parseBackupWithPreview(text: string): { data: WorkoutData, preview: BackupPreview } {
+  const data = parseBackupText(text)
+  const raw = JSON.parse(text) as unknown
+  if (!isRecord(raw) || !Number.isInteger(raw.version)) throw new Error('這不是有效的 GYMRECORD 備份檔')
+  return { data, preview: {
+    exportedAt: isDate(raw.exportedAt) ? raw.exportedAt : null,
+    sourceVersion: raw.version as number,
+    sessions: data.sessions.length,
+    routines: data.routines.length,
+    exercises: data.exerciseDefinitions.length,
+  } }
+}
+
 export function stringifyBackup(data: WorkoutData) {
-  const payload: BackupV3 = {
+  const payload: BackupV4 = {
     format: BACKUP_FORMAT,
     version: CURRENT_BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
@@ -210,28 +251,28 @@ function isMuscleArray(value: unknown): value is ExerciseDefinition['primaryMusc
   return Array.isArray(value) && value.every((muscle) => MUSCLE_GROUPS.includes(muscle)) && new Set(value).size === value.length
 }
 
-function isExerciseDefinition(value: unknown): value is ExerciseDefinition {
+function isExerciseDefinitionV3(value: unknown): value is ExerciseDefinitionV3 {
   if (!isRecord(value) || !isMuscleArray(value.primaryMuscles) || !isMuscleArray(value.secondaryMuscles)) return false
   const secondary = value.secondaryMuscles
   return isId(value.id) && isId(value.name) && isString(value.equipment) && isString(value.variation) &&
     typeof value.archived === 'boolean' && !value.primaryMuscles.some((muscle) => secondary.includes(muscle))
 }
 
-function isRoutineExerciseV3(value: unknown): value is RoutineExercise {
+function isRoutineExerciseV3(value: unknown): value is RoutineExerciseV3 {
   if (!isRecord(value)) return false
   return isId(value.id) && isId(value.exerciseDefinitionId) && isNullableNumber(value.weight) &&
     isNullableInteger(value.reps) && Number.isInteger(value.sets) && isNumber(value.sets) &&
     isNumber(value.restSeconds) && isString(value.note) && isTargetRange(value)
 }
 
-function isRoutineV3(value: unknown): value is Routine {
+function isRoutineV3(value: unknown): value is RoutineV3 {
   if (!isRecord(value)) return false
   return isId(value.id) && isString(value.name) && isString(value.label) && isString(value.accent) &&
     Number.isInteger(value.order) && isNumber(value.order) && isDate(value.updatedAt) &&
     isArrayOf(value.exercises, isRoutineExerciseV3) && hasUniqueIds(value.exercises)
 }
 
-function isSessionExerciseV3(value: unknown): value is SessionExercise {
+function isSessionExerciseV3(value: unknown): value is SessionExerciseV3 {
   if (!isRecord(value)) return false
   return isId(value.id) && isString(value.sourceExerciseId) && isId(value.exerciseDefinitionId) &&
     isString(value.name) && isString(value.equipment) && isString(value.variation) &&
@@ -239,7 +280,7 @@ function isSessionExerciseV3(value: unknown): value is SessionExercise {
     isArrayOf(value.sets, isSetLogV2) && hasUniqueIds(value.sets)
 }
 
-function isWorkoutSessionV3(value: unknown): value is WorkoutSession {
+function isWorkoutSessionV3(value: unknown): value is WorkoutSessionV3 {
   if (!isRecord(value)) return false
   return isId(value.id) && (value.routineId === null || isString(value.routineId)) &&
     isString(value.routineName) && isDate(value.startedAt) && (value.endedAt === null || isDate(value.endedAt)) &&
@@ -251,8 +292,47 @@ function isBackupV3(value: unknown): value is BackupV3 {
   if (!isRecord(value)) return false
   if (!(value.format === BACKUP_FORMAT && value.version === 3 &&
     (value.exportedAt === undefined || isDate(value.exportedAt)) &&
-    isArrayOf(value.exerciseDefinitions, isExerciseDefinition) && hasUniqueIds(value.exerciseDefinitions) &&
+    isArrayOf(value.exerciseDefinitions, isExerciseDefinitionV3) && hasUniqueIds(value.exerciseDefinitions) &&
     isArrayOf(value.routines, isRoutineV3) && hasUniqueIds(value.routines) &&
+    isArrayOf(value.sessions, isWorkoutSessionV3) && hasUniqueIds(value.sessions) &&
+    isArrayOf(value.settings, isAppSettings) && value.settings.length === 1)) return false
+  const ids = new Set(value.exerciseDefinitions.map((definition) => definition.id))
+  return value.routines.every((routine) => routine.exercises.every((exercise) => ids.has(exercise.exerciseDefinitionId))) &&
+    value.sessions.every((session) => session.exercises.every((exercise) => ids.has(exercise.exerciseDefinitionId)))
+}
+
+function isNormalizedOptions(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((option) => isString(option) && option.length > 0 && option === option.normalize('NFC').trim().replace(/\s+/gu, ' ')) &&
+    new Set(value.map((option) => option.toLocaleLowerCase())).size === value.length
+}
+
+function isExerciseDefinitionV4(value: unknown): value is ExerciseDefinition {
+  if (!isRecord(value) || !isMuscleArray(value.primaryMuscles) || !isMuscleArray(value.secondaryMuscles)) return false
+  const secondary = value.secondaryMuscles
+  return isId(value.id) && isId(value.name) && isNormalizedOptions(value.equipmentOptions) && isNormalizedOptions(value.variationOptions) &&
+    typeof value.archived === 'boolean' && !value.primaryMuscles.some((muscle) => secondary.includes(muscle))
+}
+
+function isNullableOption(value: unknown): value is string | null {
+  return value === null || (isString(value) && value.length > 0 && value === value.normalize('NFC').trim().replace(/\s+/gu, ' '))
+}
+
+function isRoutineExerciseV4(value: unknown): value is RoutineExercise {
+  if (!isRoutineExerciseV3(value) || !isRecord(value)) return false
+  const record = value as unknown as Record<string, unknown>
+  return isNullableOption(record.defaultEquipment) && isNullableOption(record.defaultVariation)
+}
+
+function isRoutineV4(value: unknown): value is Routine {
+  return isRoutineV3(value) && isRecord(value) && isArrayOf(value.exercises, isRoutineExerciseV4)
+}
+
+function isBackupV4(value: unknown): value is BackupV4 {
+  if (!isRecord(value)) return false
+  if (!(value.format === BACKUP_FORMAT && value.version === 4 &&
+    (value.exportedAt === undefined || isDate(value.exportedAt)) &&
+    isArrayOf(value.exerciseDefinitions, isExerciseDefinitionV4) && hasUniqueIds(value.exerciseDefinitions) &&
+    isArrayOf(value.routines, isRoutineV4) && hasUniqueIds(value.routines) &&
     isArrayOf(value.sessions, isWorkoutSessionV3) && hasUniqueIds(value.sessions) &&
     isArrayOf(value.settings, isAppSettings) && value.settings.length === 1)) return false
   const ids = new Set(value.exerciseDefinitions.map((definition) => definition.id))

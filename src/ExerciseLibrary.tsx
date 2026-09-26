@@ -2,7 +2,11 @@ import { useMemo, useState } from 'react'
 import { ArrowLeft, Check, ChevronRight, Plus, X } from 'lucide-react'
 import type { ExerciseDefinition, MuscleGroup, Routine, WorkoutSession } from './types'
 import { MUSCLE_GROUPS } from './types'
-import { definitionLabel, definitionSubtitle, MUSCLE_LABELS, newDefinition, validateDefinition } from './exerciseDefinitions'
+import { definitionLabel, definitionSubtitle, MUSCLE_LABELS, newDefinition, normalizeExerciseOptions, validateDefinition } from './exerciseDefinitions'
+
+function parseOptions(value: string) {
+  return normalizeExerciseOptions(value.split(/[,，、\n]/u))
+}
 
 export function ExerciseDefinitionEditor({ definition, onClose, onSave }: {
   definition: ExerciseDefinition
@@ -10,6 +14,8 @@ export function ExerciseDefinitionEditor({ definition, onClose, onSave }: {
   onSave: (definition: ExerciseDefinition) => Promise<void>
 }) {
   const [draft, setDraft] = useState({ ...definition, primaryMuscles: [...definition.primaryMuscles], secondaryMuscles: [...definition.secondaryMuscles] })
+  const [equipmentText, setEquipmentText] = useState(definition.equipmentOptions.join('、'))
+  const [variationText, setVariationText] = useState(definition.variationOptions.join('、'))
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   function toggle(muscle: MuscleGroup, kind: 'primaryMuscles' | 'secondaryMuscles') {
@@ -21,9 +27,10 @@ export function ExerciseDefinitionEditor({ definition, onClose, onSave }: {
   }
   async function save() {
     try {
-      validateDefinition(draft)
+      const normalized = { ...draft, equipmentOptions: parseOptions(equipmentText), variationOptions: parseOptions(variationText) }
+      validateDefinition(normalized)
       setSaving(true)
-      await onSave(draft)
+      await onSave(normalized)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '無法儲存動作')
     } finally { setSaving(false) }
@@ -34,8 +41,8 @@ export function ExerciseDefinitionEditor({ definition, onClose, onSave }: {
       <div className="sheet-scroll editor-scroll">
         <div className="form-grid">
           <label className="form-field"><span>動作名稱</span><input value={draft.name} autoFocus placeholder="例如 臥推" onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-          <label className="form-field"><span>器材</span><input value={draft.equipment} placeholder="例如 啞鈴，可自訂" onChange={(event) => setDraft({ ...draft, equipment: event.target.value })} /></label>
-          <label className="form-field"><span>變化</span><input value={draft.variation} placeholder="例如 上斜，可留空" onChange={(event) => setDraft({ ...draft, variation: event.target.value })} /></label>
+          <label className="form-field"><span>器材選項</span><input value={equipmentText} placeholder="例如 啞鈴、槓鈴、史密斯" onChange={(event) => setEquipmentText(event.target.value)} /><small>使用逗號或頓號分隔，仍可在訓練時輸入自訂值。</small></label>
+          <label className="form-field"><span>變化選項</span><input value={variationText} placeholder="例如 平板、上斜" onChange={(event) => setVariationText(event.target.value)} /><small>可留空，使用逗號或頓號分隔。</small></label>
         </div>
         {(['primaryMuscles', 'secondaryMuscles'] as const).map((kind) => <section className="muscle-editor-section" key={kind}>
           <h3>{kind === 'primaryMuscles' ? '主要肌群' : '次要肌群'}</h3>
@@ -55,7 +62,9 @@ export function ExercisePicker({ definitions, onSelect, onCreate }: {
   onCreate: () => void
 }) {
   const [query, setQuery] = useState('')
-  const matches = definitions.filter((definition) => !definition.archived && definitionLabel(definition).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const matches = definitions.filter((definition) => !definition.archived &&
+    `${definitionLabel(definition)} ${definitionSubtitle(definition)}`.toLocaleLowerCase().includes(normalizedQuery))
   return <div className="exercise-select-panel">
     <input aria-label="搜尋動作庫" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋動作名稱、器材或變化" />
     <div className="exercise-select-results">{matches.map((definition) => <button key={definition.id} onClick={() => onSelect(definition)}><strong>{definition.name}</strong><small>{definitionSubtitle(definition)}</small><ChevronRight size={17} /></button>)}{matches.length === 0 && <p>找不到動作，可以建立一個。</p>}</div>
@@ -80,11 +89,11 @@ export function ExerciseLibrary({ definitions, routines, sessions, onBack, onSav
   const [mergeSource, setMergeSource] = useState<ExerciseDefinition | null>(null)
   const [mergeTargetId, setMergeTargetId] = useState('')
   const [error, setError] = useState('')
-  const equipmentOptions = useMemo(() => [...new Set(definitions.map((item) => item.equipment).filter(Boolean))].sort(), [definitions])
+  const equipmentOptions = useMemo(() => [...new Set(definitions.flatMap((item) => item.equipmentOptions))].sort(), [definitions])
   const visible = definitions.filter((definition) =>
     (showArchived || !definition.archived) &&
-    definitionLabel(definition).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) &&
-    (!equipment || definition.equipment === equipment) &&
+    `${definitionLabel(definition)} ${definitionSubtitle(definition)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) &&
+    (!equipment || definition.equipmentOptions.includes(equipment)) &&
     (!muscle || [...definition.primaryMuscles, ...definition.secondaryMuscles].includes(muscle as MuscleGroup)))
   async function confirmMerge() {
     if (!mergeSource || !mergeTargetId || mergeSource.id === mergeTargetId) return
@@ -102,7 +111,7 @@ export function ExerciseLibrary({ definitions, routines, sessions, onBack, onSav
   }
   return <main className="page page-with-nav"><div className="content-wrap">
     <header className="detail-topbar"><button className="icon-button" onClick={onBack} aria-label="返回設定"><ArrowLeft size={22} /></button><span>全域動作庫</span><button className="text-action" onClick={() => setEditing(newDefinition())}><Plus size={16} /> 新增</button></header>
-    <div className="page-title"><span className="eyebrow">EXERCISE LIBRARY</span><h1>動作庫<span className="title-dot">.</span></h1><p>同一動作跨菜單共用紀錄；不同器材與變化分開追蹤。</p></div>
+    <div className="page-title"><span className="eyebrow">EXERCISE LIBRARY</span><h1>動作庫<span className="title-dot">.</span></h1><p>每筆資料代表基礎動作；器材與變化在菜單或訓練中選擇。</p></div>
     <div className="library-filters"><input aria-label="搜尋動作" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋名稱、器材、變化" />
       <select aria-label="篩選器材" value={equipment} onChange={(event) => setEquipment(event.target.value)}><option value="">全部器材</option>{equipmentOptions.map((item) => <option key={item}>{item}</option>)}</select>
       <select aria-label="篩選肌群" value={muscle} onChange={(event) => setMuscle(event.target.value)}><option value="">全部肌群</option>{MUSCLE_GROUPS.map((item) => <option key={item} value={item}>{MUSCLE_LABELS[item]}</option>)}</select>

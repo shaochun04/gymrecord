@@ -2,7 +2,7 @@ import { MUSCLE_GROUPS, type ExerciseDefinition, type MuscleGroup } from './type
 import { createId } from './id'
 
 export function newDefinition(): ExerciseDefinition {
-  return { id: createId(), name: '', equipment: '', variation: '', primaryMuscles: [], secondaryMuscles: [], archived: false }
+  return { id: createId(), name: '', equipmentOptions: [], variationOptions: [], primaryMuscles: [], secondaryMuscles: [], archived: false }
 }
 
 export const MUSCLE_LABELS: Record<MuscleGroup, string> = {
@@ -21,16 +21,38 @@ export function legacyExerciseKey(name: string, equipment: string) {
   return JSON.stringify([normalizeExerciseText(name), normalizeExerciseText(equipment)])
 }
 
-export function definitionSubtitle(definition: Pick<ExerciseDefinition, 'equipment' | 'variation'>) {
-  return [definition.equipment, definition.variation].filter(Boolean).join(' · ') || '未設定器材／變化'
+export function normalizeExerciseOptions(values: string[]) {
+  const unique = new Map<string, string>()
+  for (const value of values.map(normalizeExerciseText).filter(Boolean)) {
+    const key = value.toLocaleLowerCase()
+    if (!unique.has(key)) unique.set(key, value)
+  }
+  return [...unique.values()]
 }
 
-export function definitionLabel(definition: Pick<ExerciseDefinition, 'name' | 'equipment' | 'variation'>) {
-  return `${definition.name} · ${definitionSubtitle(definition)}`
+export function variantSubtitle(value: { equipment?: string | null, variation?: string | null }) {
+  return [value.equipment, value.variation].filter(Boolean).join(' · ') || '訓練時選擇器材／變化'
+}
+
+export function definitionSubtitle(definition: Pick<ExerciseDefinition, 'equipmentOptions' | 'variationOptions'>) {
+  const equipment = definition.equipmentOptions.length ? `器材：${definition.equipmentOptions.join('、')}` : '器材：訓練時選擇'
+  const variation = definition.variationOptions.length ? `變化：${definition.variationOptions.join('、')}` : '變化：訓練時選擇'
+  return `${equipment} · ${variation}`
+}
+
+export function definitionLabel(definition: Pick<ExerciseDefinition, 'name'>) {
+  return definition.name
 }
 
 export function validateDefinition(definition: ExerciseDefinition) {
   if (!definition.id || !normalizeExerciseText(definition.name)) throw new Error('請輸入動作名稱')
+  const normalizedEquipment = normalizeExerciseOptions(definition.equipmentOptions)
+  const normalizedVariation = normalizeExerciseOptions(definition.variationOptions)
+  if (normalizedEquipment.length !== definition.equipmentOptions.length || normalizedVariation.length !== definition.variationOptions.length ||
+    normalizedEquipment.some((value, index) => value !== definition.equipmentOptions[index]) ||
+    normalizedVariation.some((value, index) => value !== definition.variationOptions[index])) {
+    throw new Error('器材與變化選項必須移除空白與重複值')
+  }
   const primary = new Set(definition.primaryMuscles)
   const secondary = new Set(definition.secondaryMuscles)
   if (primary.size !== definition.primaryMuscles.length || secondary.size !== definition.secondaryMuscles.length ||

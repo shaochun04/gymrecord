@@ -14,7 +14,8 @@ npm run build
 - workout 計算、上次紀錄配對、單位換算與 PR。
 - 全域動作定義、肌群統計與歷史修正。
 - repository 契約、active Session 唯一性及 IndexedDB migration 失敗回滾。
-- JSON v1／v2／v3 驗證、逐版 migration、匯出與重新匯入。
+- JSON v1／v2／v3／v4 驗證、逐版 migration、匯入預覽、匯出與重新匯入。
+- 基礎動作的器材／變化 identity、歷史修正、CSV 本機日期及跨分頁 active Session lease。
 
 `npm run build` 同時執行 TypeScript build 與 Vite production build。
 
@@ -36,6 +37,7 @@ npm run build
 - 檢查菜單複製、訓練中動作排序、歷史編輯與進步頁。
 - 歷史編輯的固定底部儲存按鈕可在多組紀錄中保持可用。
 - 修改後的重量與 RIR 在重新開啟歷史詳情後仍會保留。
+- Phase 4.1 已以 360、390、412 px 檢查 Workout 器材／變化 selector、模組化 Routine Editor、歷史增刪組數、長動作名稱與長備註。
 
 ### PWA 部署
 
@@ -43,18 +45,36 @@ npm run build
 - 已確認首頁、manifest、192／512 px 圖示、service worker、JavaScript 與 CSS 可正常載入。
 - 已確認切換 App 內頁後重新整理可重新載入，瀏覽器沒有資源錯誤。
 
+## v3 active Session 升級重現流程
+
+1. 在 v3 build 建立一筆 active Session，記錄器材、變化、重量、次數與 RIR，保留至少一組未完成。
+2. 匯出 v3 JSON，另保留瀏覽器現有 IndexedDB。
+3. 更新到 v4 build 並由主畫面圖示重新開啟 PWA。
+4. 確認 App 直接進入 Workout，active Session ID、所有 set、RIR、器材與變化快照完整。
+5. 開啟菜單編輯，確認舊器材與變化已成為 `defaultEquipment`／`defaultVariation`。
+6. 完成 Session，確認不同器材／變化的 previous、PR、progression 與 volume trend 分開計算。
+7. 另在乾淨資料庫匯入保留的 v3 JSON，確認摘要後先產生 emergency backup，再比對相同項目。
+
+自動測試涵蓋相同的 migration 與資料不變條件；service worker 更新、瀏覽器 process 回收及 Android 檔案下載仍需真機驗證。
+
 ## Android 實機測試 checklist
 
 桌面 viewport 無法驗證 Android Chrome、系統鍵盤、鎖屏及檔案存取的實際行為。開始長期使用前，建議先匯出 JSON 備份，再逐項記錄結果。
 
 - [ ] 從 Android Chrome 安裝 PWA，關閉後由主畫面重開
 - [ ] 開始訓練；關閉重開後 active Session 能恢復
+- [ ] 訓練畫面向下拉仍可垂直捲動，且不觸發 pull-to-refresh
+- [ ] Android 返回手勢可關閉 modal 並回到 App 上一層，不會提早退出
+- [ ] 兩個 Chrome tab／PWA window 同時開啟相同 active Session，第二個顯示唯讀警告
 - [ ] 系統數字鍵盤與重量／次數 ± 按鈕
+- [ ] Workout 器材／變化選擇與自訂輸入；正式組完成後鎖定、只有暖身完成時仍可修改
 - [ ] 完成組與 RIR 輸入
 - [ ] 背景切換與鎖屏後，休息倒數仍按實際時間恢復
 - [ ] 長時間訓練與當次動作排序
 - [ ] 結束 Session，確認未完成組提醒及摘要
 - [ ] 編輯已完成的歷史紀錄
+- [ ] 歷史紀錄增刪 set、修改器材／變化後，previous、PR、progression 與 volume trend 重算
 - [ ] 檢查 PR、紀錄訓練量與肌群統計更新
 - [ ] 匯出 JSON 備份並確認手機可找到檔案
 - [ ] 匯入 JSON 備份並確認紀錄一致
+- [ ] 匯入前摘要正確，確認後 emergency backup 可在手機下載項目中找到

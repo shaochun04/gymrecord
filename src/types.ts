@@ -6,8 +6,8 @@ export type MuscleGroup = typeof MUSCLE_GROUPS[number]
 export type ExerciseDefinition = {
   id: string
   name: string
-  equipment: string
-  variation: string
+  equipmentOptions: string[]
+  variationOptions: string[]
   primaryMuscles: MuscleGroup[]
   secondaryMuscles: MuscleGroup[]
   archived: boolean
@@ -16,6 +16,8 @@ export type ExerciseDefinition = {
 export type RoutineExercise = {
   id: string
   exerciseDefinitionId: string
+  defaultEquipment: string | null
+  defaultVariation: string | null
   weight: number | null
   reps: number | null
   targetRepsMin: number | null

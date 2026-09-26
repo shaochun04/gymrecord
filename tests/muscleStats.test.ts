@@ -3,9 +3,9 @@ import type { ExerciseDefinition, SetLog, WorkoutSession } from '../src/types'
 import { shiftLocalWeek, startOfLocalWeek, weeklyMuscleStats } from '../src/muscleStats'
 
 const definitions: ExerciseDefinition[] = [
-  { id: 'bench', name: '臥推', equipment: '啞鈴', variation: '', primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false },
-  { id: 'squat', name: '深蹲', equipment: '槓鈴', variation: '', primaryMuscles: ['quads', 'glutes'], secondaryMuscles: ['lowerBack'], archived: false },
-  { id: 'unknown', name: '自訂', equipment: '', variation: '', primaryMuscles: [], secondaryMuscles: [], archived: true },
+  { id: 'bench', name: '臥推', equipmentOptions: ['啞鈴'], variationOptions: [], primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false },
+  { id: 'squat', name: '深蹲', equipmentOptions: ['槓鈴'], variationOptions: [], primaryMuscles: ['quads', 'glutes'], secondaryMuscles: ['lowerBack'], archived: false },
+  { id: 'unknown', name: '自訂', equipmentOptions: [], variationOptions: [], primaryMuscles: [], secondaryMuscles: [], archived: true },
 ]
 function row(id: string, done = true, kind: SetLog['kind'] = 'working'): SetLog {
   return { id, weight: 20, reps: 10, rir: null, done, kind }

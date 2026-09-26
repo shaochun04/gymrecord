@@ -38,3 +38,12 @@
 - 設定 GitHub Pages `/gymrecord/` base path、manifest、icons 與 service worker scope。
 - 建立 GitHub Actions 流程，在 `main` 更新後自動測試、建置並部署 `dist/`。
 - 提供 Android Chrome 可透過 HTTPS 安裝的正式 PWA 測試版本。
+
+## Phase 4.1：Android PWA 核心修正
+
+- 動作模型改為基礎動作加器材／變化選項，菜單保存預設值，Session 保存當次實際快照。
+- previous、預填、PR、漸進建議與訓練量趨勢改用完整 variant identity。
+- 備份與 IndexedDB 升級至 v4，保留 v1～v3 匯入相容性及 active Session 資料。
+- reload 直接恢復訓練，加入 pull-to-refresh 防護、瀏覽器返回層級與跨分頁唯讀保護。
+- 歷史修正增加 set 增刪及器材／變化修改，CSV 改用本機日期並輸出 variation。
+- 匯入前顯示內容摘要，執行原子取代前先下載現有資料的 emergency backup。

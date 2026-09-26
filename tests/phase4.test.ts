@@ -4,14 +4,14 @@ import { calculateExercisePr, completedWorkingVolumeKg, findExerciseHistory, fin
 import { weeklyMuscleStats } from '../src/muscleStats'
 import { cloneRoutine, exerciseVolumeSeries, moveSessionExercise, newSessionPrs, unfinishedSessionCounts, validateCompletedSessionEdit } from '../src/phase4Logic'
 
-const definition: ExerciseDefinition = { id: 'db-incline', name: '臥推', equipment: '啞鈴', variation: '上斜', primaryMuscles: ['chest'], secondaryMuscles: ['frontDelts'], archived: false }
+const definition: ExerciseDefinition = { id: 'bench', name: '臥推', equipmentOptions: ['啞鈴'], variationOptions: ['上斜'], primaryMuscles: ['chest'], secondaryMuscles: ['frontDelts'], archived: false }
 const row = (id: string, weight: number | null, reps: number | null, done = true, kind: SetLog['kind'] = 'working', rir: SetLog['rir'] = null): SetLog =>
   ({ id, weight, reps, done, kind, rir })
 function session(id: string, sets: SetLog[], startedAt = '2026-09-23T10:00:00.000Z', status: WorkoutSession['status'] = 'completed'): WorkoutSession {
   return { id, routineId: id === 'push' ? 'push' : 'upper', routineName: id, startedAt,
     endedAt: status === 'completed' ? '2026-09-23T11:00:00.000Z' : null, status, restEndsAt: null,
     exercises: [{ id: `exercise-${id}`, sourceExerciseId: `slot-${id}`, exerciseDefinitionId: definition.id,
-      name: definition.name, equipment: definition.equipment, variation: definition.variation,
+      name: definition.name, equipment: '啞鈴', variation: '上斜',
       note: id, restSeconds: 90, targetRepsMin: 8, targetRepsMax: 12, sets }] }
 }
 
@@ -23,11 +23,11 @@ describe('completed session correction', () => {
     corrected.exercises[0].sets[0] = row('mistake', 22, 10, true, 'working', 2)
     corrected.exercises[0].sets[1] = row('unfinished', 10, 12, true, 'warmup')
     expect(() => validateCompletedSessionEdit(original, corrected)).not.toThrow()
-    expect(calculateExercisePr(findExerciseHistory(definition.id, [previous, original])).weightPr?.weight).toBe(200)
-    expect(calculateExercisePr(findExerciseHistory(definition.id, [previous, corrected])).weightPr?.weight).toBe(22)
+    expect(calculateExercisePr(findExerciseHistory(original.exercises[0], [previous, original])).weightPr?.weight).toBe(200)
+    expect(calculateExercisePr(findExerciseHistory(corrected.exercises[0], [previous, corrected])).weightPr?.weight).toBe(22)
     expect(completedWorkingVolumeKg(original)).toBe(2000)
     expect(completedWorkingVolumeKg(corrected)).toBe(220)
-    expect(exerciseVolumeSeries(definition.id, [corrected, previous]).map((point) => point.volumeKg)).toEqual([200, 220])
+    expect(exerciseVolumeSeries(corrected.exercises[0], [corrected, previous]).map((point) => point.volumeKg)).toEqual([200, 220])
     const week = new Date('2026-09-23T12:00:00.000Z')
     expect(weeklyMuscleStats([previous, original], [definition], week).muscles.find((item) => item.muscle === 'chest')?.sets).toBe(2)
     const noWorking = structuredClone(corrected)
@@ -72,7 +72,7 @@ describe('session and routine convenience', () => {
 
   it('clones a routine with fresh routine and slot IDs but unchanged global definitions and notes', () => {
     const routine: Routine = { id: 'push', name: 'Push', label: '胸', accent: '#abc', order: 0, updatedAt: '2026-09-20T10:00:00.000Z',
-      exercises: [{ id: 'slot', exerciseDefinitionId: definition.id, weight: 22, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '椅背 30°' }] }
+      exercises: [{ id: 'slot', exerciseDefinitionId: definition.id, defaultEquipment: '啞鈴', defaultVariation: '上斜', weight: 22, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '椅背 30°' }] }
     const cloned = cloneRoutine(routine, 5)
     expect(cloned).toMatchObject({ name: 'Push Copy', order: 5 })
     expect(cloned.id).not.toBe(routine.id)
@@ -90,6 +90,6 @@ describe('PR completion and shared global identity', () => {
     expect(prs.filter((item) => item.kind === 'weight').map((item) => item.set.id)).toEqual(['newWeight'])
     expect(prs.filter((item) => item.kind === 'reps' && item.set.weight === 20).map((item) => item.set.id)).toEqual(['moreReps'])
     expect(newSessionPrs({ ...current, status: 'active' }, [previous])).toEqual([])
-    expect(findPreviousPerformance(definition.id, [previous])?.sets[0].id).toBe('old')
+    expect(findPreviousPerformance(previous.exercises[0], [previous])?.sets[0].id).toBe('old')
   })
 })

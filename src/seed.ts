@@ -1,19 +1,24 @@
 import type { ExerciseDefinition, MuscleGroup, Routine, RoutineExercise } from './types'
 import { createId } from './id'
-import { legacyExerciseKey } from './exerciseDefinitions'
+import { normalizeExerciseText } from './exerciseDefinitions'
 
 export function makeInitialData(): { exerciseDefinitions: ExerciseDefinition[], routines: Routine[] } {
   const definitions = new Map<string, ExerciseDefinition>()
   const updatedAt = new Date().toISOString()
   function exercise(name: string, equipment = '', weight: number | null = null, reps: number | null = null,
     sets = 3, restSeconds = 90, primaryMuscles: MuscleGroup[] = [], secondaryMuscles: MuscleGroup[] = []): RoutineExercise {
-    const key = legacyExerciseKey(name, equipment)
+    const key = normalizeExerciseText(name).toLocaleLowerCase()
     let definition = definitions.get(key)
     if (!definition) {
-      definition = { id: createId(), name, equipment, variation: '', primaryMuscles, secondaryMuscles, archived: false }
+      definition = { id: createId(), name: normalizeExerciseText(name), equipmentOptions: equipment ? [normalizeExerciseText(equipment)] : [],
+        variationOptions: [], primaryMuscles, secondaryMuscles, archived: false }
       definitions.set(key, definition)
+    } else {
+      if (equipment && !definition.equipmentOptions.includes(normalizeExerciseText(equipment))) definition.equipmentOptions.push(normalizeExerciseText(equipment))
+      definition.primaryMuscles = [...new Set([...definition.primaryMuscles, ...primaryMuscles])]
+      definition.secondaryMuscles = [...new Set([...definition.secondaryMuscles, ...secondaryMuscles])].filter((muscle) => !definition!.primaryMuscles.includes(muscle))
     }
-    return { id: createId(), exerciseDefinitionId: definition.id, weight, reps,
+    return { id: createId(), exerciseDefinitionId: definition.id, defaultEquipment: equipment ? normalizeExerciseText(equipment) : null, defaultVariation: null, weight, reps,
       targetRepsMin: reps, targetRepsMax: reps, sets, restSeconds, note: '' }
   }
   const routines: Routine[] = [

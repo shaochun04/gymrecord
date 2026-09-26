@@ -1,6 +1,7 @@
 import type { Routine, SetLog, WorkoutSession } from './types'
 import { createId } from './id'
-import { findExerciseHistory } from './workoutLogic'
+import { exerciseIdentityKey, findExerciseHistory, sameExerciseIdentity, type ExerciseIdentity } from './workoutLogic'
+import { normalizeExerciseText } from './exerciseDefinitions'
 
 export function validateCompletedSessionEdit(original: WorkoutSession, edited: WorkoutSession) {
   if (original.status !== 'completed' || edited.status !== 'completed' || original.id !== edited.id) {
@@ -14,12 +15,12 @@ export function validateCompletedSessionEdit(original: WorkoutSession, edited: W
     const before = original.exercises[index]
     if (exercise.id !== before.id || exercise.sourceExerciseId !== before.sourceExerciseId ||
       exercise.exerciseDefinitionId !== before.exerciseDefinitionId || exercise.name !== before.name ||
-      exercise.equipment !== before.equipment || exercise.variation !== before.variation ||
       exercise.note !== before.note || exercise.restSeconds !== before.restSeconds ||
-      exercise.targetRepsMin !== before.targetRepsMin || exercise.targetRepsMax !== before.targetRepsMax ||
-      exercise.sets.length !== before.sets.length) throw new Error('動作資料不可修改')
-    exercise.sets.forEach((set, setIndex) => {
-      if (set.id !== before.sets[setIndex].id ||
+      exercise.targetRepsMin !== before.targetRepsMin || exercise.targetRepsMax !== before.targetRepsMax) throw new Error('動作基本資料不可修改')
+    if (exercise.equipment !== normalizeExerciseText(exercise.equipment) || exercise.variation !== normalizeExerciseText(exercise.variation) ||
+      new Set(exercise.sets.map((set) => set.id)).size !== exercise.sets.length) throw new Error('器材、變化或組別資料無效')
+    exercise.sets.forEach((set) => {
+      if (!set.id ||
         (set.weight !== null && (!Number.isFinite(set.weight) || set.weight < 0)) ||
         (set.reps !== null && (!Number.isInteger(set.reps) || set.reps < 0)) ||
         (set.rir !== null && ![0, 1, 2, 3, 4].includes(set.rir)) ||
@@ -51,11 +52,11 @@ export function cloneRoutine(routine: Routine, order: number): Routine {
     updatedAt: new Date().toISOString(), exercises: routine.exercises.map((exercise) => ({ ...exercise, id: createId() })) }
 }
 
-export function exerciseVolumeSeries(exerciseDefinitionId: string, sessions: WorkoutSession[]) {
+export function exerciseVolumeSeries(identity: ExerciseIdentity, sessions: WorkoutSession[]) {
   return [...sessions].filter((session) => session.status === 'completed')
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
     .flatMap((session) => {
-      const sets = session.exercises.filter((exercise) => exercise.exerciseDefinitionId === exerciseDefinitionId)
+      const sets = session.exercises.filter((exercise) => sameExerciseIdentity(exercise, identity))
         .flatMap((exercise) => exercise.sets.filter((set) => set.done && set.kind === 'working'))
       if (!sets.length) return []
       return [{ sessionId: session.id, date: session.startedAt,
@@ -69,15 +70,15 @@ export type SessionPr = { exerciseDefinitionId: string, name: string, equipment:
 export function newSessionPrs(session: WorkoutSession, previousSessions: WorkoutSession[]): SessionPr[] {
   if (session.status !== 'completed') return []
   const results: SessionPr[] = []
-  const ids = new Set(session.exercises.map((exercise) => exercise.exerciseDefinitionId))
-  for (const id of ids) {
-    const currentExercises = session.exercises.filter((exercise) => exercise.exerciseDefinitionId === id)
+  const identities = new Map(session.exercises.map((exercise) => [exerciseIdentityKey(exercise), exercise]))
+  for (const label of identities.values()) {
+    const currentExercises = session.exercises.filter((exercise) => sameExerciseIdentity(exercise, label))
     const currentSets = currentExercises.flatMap((exercise) => exercise.sets).filter((set) =>
       set.done && set.kind === 'working' && set.weight !== null && set.weight > 0 && set.reps !== null && set.reps > 0)
     if (!currentSets.length) continue
-    const previous = findExerciseHistory(id, previousSessions, session.id).flatMap((entry) => entry.sets)
+    const previous = findExerciseHistory(label, previousSessions, session.id).flatMap((entry) => entry.sets)
       .filter((set) => set.kind === 'working' && set.weight !== null && set.weight > 0 && set.reps !== null && set.reps > 0)
-    const label = currentExercises[0]
+    const id = label.exerciseDefinitionId
     const currentBest = currentSets.reduce((best, set) => !best || set.weight! > best.weight! ||
       (set.weight === best.weight && set.reps! > best.reps!) ? set : best, null as SetLog | null)!
     const previousMaxWeight = Math.max(0, ...previous.map((set) => set.weight!))

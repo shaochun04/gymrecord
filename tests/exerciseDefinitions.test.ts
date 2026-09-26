@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { legacyExerciseKey, normalizeExerciseText, validateDefinition } from '../src/exerciseDefinitions'
+import { legacyExerciseKey, normalizeExerciseOptions, normalizeExerciseText, validateDefinition } from '../src/exerciseDefinitions'
 import { migrateWorkoutDataV2, type WorkoutDataV2 } from '../src/data/modelMigration'
 import type { ExerciseDefinition } from '../src/types'
 
-const definition: ExerciseDefinition = { id: 'd', name: '臥推', equipment: '啞鈴', variation: '', primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false }
+const definition: ExerciseDefinition = { id: 'd', name: '臥推', equipmentOptions: ['啞鈴'], variationOptions: [], primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false }
 const legacy: WorkoutDataV2 = {
   routines: [{ id: 'push', name: 'Push', label: '', accent: '#fff', order: 0, updatedAt: '2026-09-20T00:00:00Z', exercises: [
     { id: 'a', name: '  啞鈴  臥推 ', equipment: ' 啞鈴 ', weight: 20, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '' },
@@ -22,6 +22,7 @@ describe('exercise definitions and conservative migration', () => {
     expect(normalizeExerciseText('  啞鈴   臥推  ')).toBe('啞鈴 臥推')
     expect(legacyExerciseKey('  啞鈴   臥推 ', ' 啞鈴 ')).toBe(legacyExerciseKey('啞鈴 臥推', '啞鈴'))
     expect(legacyExerciseKey('啞鈴臥推', '啞鈴')).not.toBe(legacyExerciseKey('啞鈴平板臥推', '啞鈴'))
+    expect(normalizeExerciseOptions([' Cable ', 'cable', '槓鈴'])).toEqual(['Cable', '槓鈴'])
   })
 
   it('shares exact matches across routines, separates equipment, and archives history-only definitions', () => {

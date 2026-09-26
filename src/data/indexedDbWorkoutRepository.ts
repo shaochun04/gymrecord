@@ -1,10 +1,12 @@
 import Dexie, { liveQuery, type EntityTable } from 'dexie'
 import { makeInitialData } from '../seed'
 import type { AppSettings, ExerciseDefinition, Routine, WorkoutSession } from '../types'
-import { normalizeExerciseText, validateDefinition } from '../exerciseDefinitions'
+import { normalizeExerciseOptions, normalizeExerciseText, validateDefinition } from '../exerciseDefinitions'
 import type { WorkoutChangeSource } from './workoutChanges'
 import { ActiveSessionExistsError, MultipleActiveSessionsError, type WorkoutData, type WorkoutRepository } from './workoutRepository'
-import { migrateRoutineV1, migrateSessionV1, migrateWorkoutDataV2, type RoutineV1, type RoutineV2, type WorkoutSessionV1, type WorkoutSessionV2 } from './modelMigration'
+import { migrateRoutineV1, migrateSessionV1, migrateWorkoutDataV2, migrateWorkoutDataV3,
+  type ExerciseDefinitionV3, type RoutineV1, type RoutineV2, type RoutineV3,
+  type WorkoutSessionV1, type WorkoutSessionV2, type WorkoutSessionV3 } from './modelMigration'
 
 const db = new Dexie('gymrecord') as Dexie & {
   exerciseDefinitions: EntityTable<ExerciseDefinition, 'id'>
@@ -46,6 +48,24 @@ db.version(3).stores({
   await transaction.table('sessions').bulkPut(migrated.sessions)
 })
 
+db.version(4).stores({
+  exerciseDefinitions: 'id, name, archived',
+  routines: 'id, order, name',
+  sessions: 'id, status, startedAt, routineId',
+  settings: 'id',
+}).upgrade(async (transaction) => {
+  const exerciseDefinitions = await transaction.table('exerciseDefinitions').toArray() as ExerciseDefinitionV3[]
+  const routines = await transaction.table('routines').toArray() as RoutineV3[]
+  const sessions = await transaction.table('sessions').toArray() as WorkoutSessionV3[]
+  const migrated = migrateWorkoutDataV3({ exerciseDefinitions, routines, sessions })
+  await transaction.table('exerciseDefinitions').clear()
+  await transaction.table('routines').clear()
+  await transaction.table('sessions').clear()
+  await transaction.table('exerciseDefinitions').bulkPut(migrated.exerciseDefinitions)
+  await transaction.table('routines').bulkPut(migrated.routines)
+  await transaction.table('sessions').bulkPut(migrated.sessions)
+})
+
 export class IndexedDbWorkoutRepository implements WorkoutRepository {
   async initialize() {
     await db.transaction('rw', db.exerciseDefinitions, db.routines, db.settings, async () => {
@@ -62,9 +82,11 @@ export class IndexedDbWorkoutRepository implements WorkoutRepository {
 
   async getExerciseDefinitions() { return db.exerciseDefinitions.orderBy('name').toArray() }
   async saveExerciseDefinition(definition: ExerciseDefinition) {
-    validateDefinition(definition)
-    await db.exerciseDefinitions.put({ ...definition, name: normalizeExerciseText(definition.name),
-      equipment: normalizeExerciseText(definition.equipment), variation: normalizeExerciseText(definition.variation) })
+    const normalized = { ...definition, name: normalizeExerciseText(definition.name),
+      equipmentOptions: normalizeExerciseOptions(definition.equipmentOptions),
+      variationOptions: normalizeExerciseOptions(definition.variationOptions) }
+    validateDefinition(normalized)
+    await db.exerciseDefinitions.put(normalized)
   }
   async archiveExerciseDefinition(id: string, archived: boolean) {
     if (!(await db.exerciseDefinitions.get(id))) throw new Error('找不到這個動作')
@@ -82,6 +104,9 @@ export class IndexedDbWorkoutRepository implements WorkoutRepository {
         exercise.exerciseDefinitionId === sourceId ? { ...exercise, exerciseDefinitionId: targetId } : exercise) })))
       await db.sessions.bulkPut(affectedSessions.map((session) => ({ ...session, exercises: session.exercises.map((exercise) =>
         exercise.exerciseDefinitionId === sourceId ? { ...exercise, exerciseDefinitionId: targetId } : exercise) })))
+      await db.exerciseDefinitions.put({ ...target,
+        equipmentOptions: normalizeExerciseOptions([...target.equipmentOptions, ...source.equipmentOptions]),
+        variationOptions: normalizeExerciseOptions([...target.variationOptions, ...source.variationOptions]) })
       await db.exerciseDefinitions.update(sourceId, { archived: true })
       return { routines: affectedRoutines.length, sessions: affectedSessions.length }
     })

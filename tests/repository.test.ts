@@ -9,10 +9,10 @@ import { validateCompletedSessionEdit } from '../src/phase4Logic'
 import { calculateExercisePr, completedWorkingVolumeKg, findExerciseHistory } from '../src/workoutLogic'
 
 const settings: WorkoutData['settings'] = { id: 'main', unit: 'kg', restTimerEnabled: true }
-const definition: WorkoutData['exerciseDefinitions'][number] = { id: 'db-bench', name: '臥推', equipment: '啞鈴', variation: '平板', primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false }
-const target: WorkoutData['exerciseDefinitions'][number] = { ...definition, id: 'smith-bench', equipment: '史密斯', primaryMuscles: [], secondaryMuscles: [] }
+const definition: WorkoutData['exerciseDefinitions'][number] = { id: 'db-bench', name: '臥推', equipmentOptions: ['啞鈴'], variationOptions: ['平板'], primaryMuscles: ['chest'], secondaryMuscles: ['triceps'], archived: false }
+const target: WorkoutData['exerciseDefinitions'][number] = { ...definition, id: 'press', name: '推舉', equipmentOptions: ['史密斯'], primaryMuscles: [], secondaryMuscles: [] }
 const routine: WorkoutData['routines'][number] = { id: 'push', name: 'Push', label: '胸', accent: '#abc', order: 0,
-  updatedAt: '2026-09-20T10:00:00.000Z', exercises: [{ id: 'slot', exerciseDefinitionId: definition.id, weight: 20, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '' }] }
+  updatedAt: '2026-09-20T10:00:00.000Z', exercises: [{ id: 'slot', exerciseDefinitionId: definition.id, defaultEquipment: '啞鈴', defaultVariation: '平板', weight: 20, reps: 10, targetRepsMin: 8, targetRepsMax: 12, sets: 3, restSeconds: 90, note: '' }] }
 function session(id: string, status: 'active' | 'completed' = 'completed'): WorkoutData['sessions'][number] {
   return { id, routineId: 'push', routineName: 'Push', startedAt: '2026-09-21T10:00:00.000Z', endedAt: status === 'completed' ? '2026-09-21T11:00:00.000Z' : null,
     status, restEndsAt: null, exercises: [{ id: `exercise-${id}`, sourceExerciseId: 'slot', exerciseDefinitionId: definition.id, name: '舊名稱', equipment: '舊器材', variation: '舊變化', note: 'snapshot', restSeconds: 90, targetRepsMin: 8, targetRepsMax: 12,
@@ -41,18 +41,19 @@ beforeAll(async () => {
   await repository.initialize()
 })
 
-describe('IndexedDB v3 repository', () => {
-  it('migrates v2 active/completed sessions and routine slots without guessing variation or muscles', async () => {
+describe('IndexedDB v4 repository', () => {
+  it('migrates v2 data through v4, groups exact names, and preserves snapshots', async () => {
     const definitions = await repository.getExerciseDefinitions()
-    expect(definitions).toHaveLength(3)
-    const dumbbell = definitions.find((item) => item.equipment === '啞鈴')!
-    expect(dumbbell).toMatchObject({ name: '臥推', variation: '', primaryMuscles: [], secondaryMuscles: [], archived: false })
+    expect(definitions).toHaveLength(2)
+    const bench = definitions.find((item) => item.name === '臥推')!
+    expect([...bench.equipmentOptions].sort()).toEqual(['啞鈴', '史密斯'].sort())
+    expect(bench).toMatchObject({ variationOptions: [], primaryMuscles: [], secondaryMuscles: [], archived: false })
     const historical = definitions.find((item) => item.name === '舊划船')!
     expect(historical.archived).toBe(true)
     const routines = await repository.getRoutines()
-    expect(routines.find((item) => item.id === 'push')!.exercises[0].exerciseDefinitionId).toBe(dumbbell.id)
-    expect(routines.find((item) => item.id === 'upper')!.exercises[0].exerciseDefinitionId).toBe(dumbbell.id)
-    expect(routines.find((item) => item.id === 'smith')!.exercises[0].exerciseDefinitionId).not.toBe(dumbbell.id)
+    expect(routines.find((item) => item.id === 'push')!.exercises[0]).toMatchObject({ exerciseDefinitionId: bench.id, defaultEquipment: '啞鈴', defaultVariation: null })
+    expect(routines.find((item) => item.id === 'upper')!.exercises[0].exerciseDefinitionId).toBe(bench.id)
+    expect(routines.find((item) => item.id === 'smith')!.exercises[0]).toMatchObject({ exerciseDefinitionId: bench.id, defaultEquipment: '史密斯' })
     const sessions = await repository.getSessions()
     expect(sessions.map((item) => item.id).sort()).toEqual(['active', 'finished', 'historical-only'])
     expect(sessions.find((item) => item.id === 'active')?.status).toBe('active')
@@ -72,7 +73,7 @@ describe('IndexedDB v3 repository', () => {
 
     it('detects already corrupted active sessions', async () => {
       const raw = new Dexie('gymrecord')
-      raw.version(3).stores({ exerciseDefinitions: 'id, name, equipment, variation, archived', routines: 'id, order, name', sessions: 'id, status, startedAt, routineId', settings: 'id' })
+      raw.version(4).stores({ exerciseDefinitions: 'id, name, archived', routines: 'id, order, name', sessions: 'id, status, startedAt, routineId', settings: 'id' })
       await raw.table('sessions').bulkPut([session('a', 'active'), session('b', 'active')])
       raw.close()
       await expect(repository.getActiveSession()).rejects.toBeInstanceOf(MultipleActiveSessionsError)
@@ -98,7 +99,7 @@ describe('IndexedDB v3 repository', () => {
       expect(sessions.every((item) => item.exercises[0].exerciseDefinitionId === target.id)).toBe(true)
       expect(sessions[0].exercises[0]).toMatchObject({ name: '舊名稱', equipment: '舊器材', variation: '舊變化' })
       expect((await repository.getExerciseDefinitions()).find((item) => item.id === definition.id)?.archived).toBe(true)
-      const grouped = findExerciseHistory(target.id, sessions)
+      const grouped = findExerciseHistory({ exerciseDefinitionId: target.id, equipment: '舊器材', variation: '舊變化' }, sessions)
       expect(grouped.map((entry) => entry.sessionId).sort()).toEqual(['already-target', 'completed'])
       expect(calculateExercisePr(grouped).weightPr?.weight).toBe(30)
     })
@@ -125,7 +126,7 @@ describe('IndexedDB v3 repository', () => {
       expect(await repository.readAll()).toEqual(before)
     })
 
-    it('round trips a v3 JSON backup through the repository', async () => {
+    it('round trips a v4 JSON backup through the repository', async () => {
       await repository.saveSession(session('completed'))
       const before = await repository.readAll()
       await repository.replaceAll({ exerciseDefinitions: [], routines: [], sessions: [], settings })
@@ -133,7 +134,7 @@ describe('IndexedDB v3 repository', () => {
       expect(await repository.readAll()).toEqual(before)
     })
 
-    it('edits a completed session, recalculates records, and preserves the correction through v3 backup', async () => {
+    it('edits a completed session, recalculates records, and preserves the correction through v4 backup', async () => {
       await repository.saveSession(session('completed'))
       const original = (await repository.getSession('completed'))!
       const edited = structuredClone(original)
@@ -143,9 +144,9 @@ describe('IndexedDB v3 repository', () => {
       validateCompletedSessionEdit(original, edited)
       await repository.saveSession(edited)
       expect(completedWorkingVolumeKg((await repository.getSession('completed'))!)).toBe(264)
-      expect(calculateExercisePr(findExerciseHistory(definition.id, await repository.getSessions())).weightPr?.weight).toBe(22)
+      expect(calculateExercisePr(findExerciseHistory(edited.exercises[0], await repository.getSessions())).weightPr?.weight).toBe(22)
       const backup = stringifyBackup(await repository.readAll())
-      expect(JSON.parse(backup).version).toBe(3)
+      expect(JSON.parse(backup).version).toBe(4)
       await repository.replaceAll({ exerciseDefinitions: [], routines: [], sessions: [], settings })
       await importBackup(new File([backup], 'correction.json'), repository)
       expect(await repository.getSession('completed')).toEqual(edited)
